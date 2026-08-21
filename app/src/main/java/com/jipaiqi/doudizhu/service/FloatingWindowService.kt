@@ -240,6 +240,26 @@ class FloatingWindowService : Service() {
         b.llNumList.visibility = if (hasHand) View.VISIBLE else View.GONE
         b.line.visibility = if (hasHand) View.VISIBLE else View.GONE
 
+        // ── Diagnostic overlay: surface the last NCNN frame statistics so
+        //    the user can tell (from the UI alone) whether YOLO is actually
+        //    seeing boxes.  Without this, "等待牌局正式开始" is ambiguous
+        //    between "clustering dropped the row" vs "YOLO saw nothing".
+        runCatching {
+            val detCnt  = ScreenCaptureService.sLastFrameDetections
+            val handCnt = ScreenCaptureService.sLastFrameHandCount
+            val nt = b.root.findViewById<TextView>(R.id.nostart_text)
+            if (nt != null && !hasHand) {
+                val prefix = when {
+                    detCnt  >= 20 -> "NCNN=${detCnt}框/聚类中…"
+                    detCnt  >  0 -> "NCNN=${detCnt}框/handCnt=$handCnt…"
+                    core.nativeYoloReady -> "原版NCNN已就绪(等发牌或出牌画面)…"
+                    else -> "识别核心未就绪…"
+                }
+                nt.text = prefix
+                nt.setTextColor(0xFF58E882.toInt())
+            }
+        }
+
         // Remaining = total - myHand - played_all, per rank.
         // NOTE: don't collapse to Set — duplicate ranks must be counted.
         val myHandCounts = HashMap<Int, Int>()

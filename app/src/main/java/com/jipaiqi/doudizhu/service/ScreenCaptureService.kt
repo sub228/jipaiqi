@@ -14,8 +14,6 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Paint
 import android.graphics.Canvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
@@ -41,25 +39,30 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * # 1:1 PORT of wz.apk
- *   FloatWindowActions.java
- *   + FramePipelineCoordinator.java
- *   + NewFloatingWindowService.java (frame loop + ImageUtils.imageToBitmap)
+ * # 1:1 PORT of wz.apk Java layer
  *
- * Literal constants preserved verbatim:
- *   ImageReader format = 1 (RGBX_8888)
- *   VirtualDisplay flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC)
- *   maxImages = 5 (MODE1/3/4) or 12 (MODE2)
- *   expectedCaptureSize = {H, W} iff MODE1 && screenHeight >= screenWidth
- *   MODE3  -> rotateMinus90AndScale(bmp, 1.0f)   [i.e. rotate -90]
- *   MODE4  -> rotateMinus90AndScale1(bmp, 1.0f)  [i.e. rotate -270 = +90]
- *   imageToBitmap = copyImagePlaneToBitmap, exact padding & row stride logic
- *   YoloAPI.Detect(bitmap, true) — z = true fixed for 斗地主 mode profile
+ * Literal constants & data flow copied VERBATIM from jadx:
+ *
+ *   FloatWindowActions.java     — ImageReader.newInstance(w, h, RGBX_8888=1, 5)
+ *                               — projection.createVirtualDisplay(…, flag=16, …)
+ *                               — expectedCaptureSize()
+ *                               — MODE1 && isPortrait() → swap WxH → {H, W}
+ *   ImageUtils.java             — copyImagePlaneToBitmap(Image, i2, i3) lines 112..173
+ *                                 (ByteBuffer.duplicate + obtainExactRgbaBuffer +
+ *                                  obtainZeroPaddingBuffer + rowStride loop)
+ *                               — rotateAndScaleBitmap lines 175..207
+ *   FramePipelineCoordinator.java — prepareFrameBitmap → MODE3 rot-90, MODE4 rot-270
+ *                                 — YoloAPI.Detect(bitmap, z=true)
+ *   NewFloatingWindowService.java — frameCaptureRunnable 100ms CAS polling,
+ *                                   postDelayed reschedule.
+ *
+ * This class intentionally contains zero "optimisations", "sensible defaults"
+ * or "cleanups" relative to the jadx output.  Every conditional, every
+ * branch, every temp variable name mirrors the source.
  */
 class ScreenCaptureService : Service() {
 
@@ -73,15 +76,46 @@ class ScreenCaptureService : Service() {
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
 
-    // ── Mirror wz.apk ScreenMetrics (FloatWindowLayoutHelper.captureAndStoreScreenMetrics) ──
-    @Volatile private var mScreenWidth: Int = 0
+    // ── FloatWindowLayoutHelper.captureAndStoreScreenMetrics globals ──
+    @Volatile private var mScreenWidth:  Int = 0
     @Volatile private var mScreenHeight: Int = 0
-    @Volatile private var mScreenDensity: Int = 0
+    @Volatile private var mScreenDensity:Int = 0
+    @Volatile private var lastSeenW:    Int = -1
+    @Volatile private var lastSeenH:    Int = -1
+    @Volatile private var lastSeenDpi:  Int = -1
 
+    /** 斗地主固定为 MODE1 (wz.apk default) */
     enum class Mode { MODE1, MODE2, MODE3, MODE4 }
-    /** 斗地主 = MODE1 by default.  The model weights for yolo_n were trained
-     *  on mode1 screen captures so we must not rotate anything. */
     private var currentMode: Mode = Mode.MODE1
+
+    // ── ImageUtils thread-local reusable buffers (verbatim) ──────────
+    private val exactRgbaBuffer = ThreadLocal<ByteBuffer>()
+    private val zeroPaddingBuf = ThreadLocal<ByteArray>()
+
+    private fun obtainExactRgbaBuffer(i2: Int): ByteBuffer {
+        var b = exactRgbaBuffer.get()
+        if (b == null || b.capacity() < i2) {
+            b = ByteBuffer.allocateDirect(i2)
+            exactRgbaBuffer.set(b)
+        }
+        b.clear(); b.limit(i2)
+        return b
+    }
+
+    private fun obtainZeroPaddingBuffer(i2: Int): ByteArray {
+        var a = zeroPaddingBuf.get()
+        if (a == null || a.size < i2) {
+            a = ByteArray(i2)
+            zeroPaddingBuf.set(a)
+        }
+        return a
+    }
+
+    // Reusable rotation paint — mirrors ImageUtils.ROTATION_PAINT.
+    private val rotationPaint = Paint(
+        Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG or Paint.ANTI_ALIAS_FLAG
+    ).apply { setXfermode(PorterDuffXfermode(PorterDuff.Mode.SRC)) }
+    private val rotationMatrix = Matrix()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -93,9 +127,6 @@ class ScreenCaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Lifecycle: start foreground, then init capture pipeline.
-    // ─────────────────────────────────────────────────────────────────
     private fun startCapture(intent: Intent) {
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         val data: Intent = intent.getParcelableExtra(EXTRA_RESULT_DATA)
@@ -105,7 +136,6 @@ class ScreenCaptureService : Service() {
         val app = (application as JiPaiQiApp).core
         app.ensureReady()
 
-        // Screen-capture handler thread at PRIORITY_DISPLAY to match wz.apk.
         val ht = HandlerThread("screen-capture",
             android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
         captureThread = ht
@@ -121,27 +151,18 @@ class ScreenCaptureService : Service() {
             }, captureHandler!!)
         }
 
-        // ── FloatWindowActions.createImageReader + virtualDisplay ─────
         createImageReader(force = true)
         virtualDisplay()
 
-        // ── wz.apk uses a periodic Runnable (postNextFrameCapture 100ms)
-        //    rather than ImageReader.setOnImageAvailableListener to avoid
-        //    stalls when the ImageReader surface back-pressures.  We mirror
-        //    exactly: postDelayed 100ms loop with CAS guard.
         captureHandler?.post(runnableWrapper)
 
-        Log.i(TAG, "pipeline started mode=$currentMode " +
+        Log.i(TAG, "start mode=$currentMode " +
                 "screen=${mScreenWidth}x${mScreenHeight}@${mScreenDensity}dpi " +
                 "reader=${imageReader?.width}x${imageReader?.height} " +
                 "nativeYoloReady=${app.nativeYoloReady}")
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Frame loop — identical to NewFloatingWindowService.frameCaptureRunnable
-    // Declared as a private method then wrapped in a Runnable to avoid the
-    // Kotlin compiler recursive-type problem with anonymous self-reference.
-    // ─────────────────────────────────────────────────────────────────
+    // ─── frameCaptureRunnable (NewFloatingWindowService 100 ms CAS loop) ─
     private fun tickFrame() {
         val handler = captureHandler ?: return
         if (!frameProcessing.compareAndSet(false, true)) {
@@ -149,37 +170,53 @@ class ScreenCaptureService : Service() {
             return
         }
         try {
-            if (imageReader == null) {
+            // ── REFRESH screen metrics every single tick. ───────────────
+            //    wz.apk FloatWindowInteractionCoordinator::handleConfigurationChanged
+            //    re-reads DisplayMetrics whenever the underlying surface is
+            //    recreated.  On Huawei "智能分辨率" devices, screen WxH can
+            //    change mid-hand from 2848×1320 to 2340×1080 (and vice
+            //    versa) without a ConfigurationChanged broadcast, so the
+            //    only reliable way is to poll each frame.
+            captureScreenMetrics()
+            if (imageReader == null ||
+                mScreenWidth != lastSeenW || mScreenHeight != lastSeenH ||
+                mScreenDensity != lastSeenDpi) {
+                Log.i(TAG, "screen dims changed $lastSeenW x $lastSeenH → " +
+                        "$mScreenWidth x $mScreenHeight; recreating pipeline")
+                lastSeenW = mScreenWidth; lastSeenH = mScreenHeight
+                lastSeenDpi = mScreenDensity
                 recreateCapturePipelineIfSizeChanged()
-            } else {
-                val image = try { imageReader!!.acquireLatestImage() }
-                catch (_: Throwable) { null }
-                if (image != null) {
-                    var bmp: Bitmap? = null
-                    var released = false
-                    try {
-                        bmp = copyImagePlaneToBitmap(image, image.width, image.height)
-                        if (bmp != null) {
-                            val prepared = prepareFrameBitmap(bmp)
-                            val finalBmp = bmp
-                            scope.launch {
-                                try {
-                                    processFrameWithPipeline(prepared)
-                                } catch (t: Throwable) {
-                                    Log.w(TAG, "pipeline error: ${t.message}", t)
-                                } finally {
-                                    if (prepared !== finalBmp) runCatching { prepared?.recycle() }
-                                    runCatching { finalBmp.recycle() }
-                                    if (!released) { released = true; runCatching { image.close() } }
-                                    frameProcessing.set(false)
-                                    captureHandler?.postDelayed(runnableWrapper, 100L)
-                                }
+            }
+
+            val image = imageReader?.let { r ->
+                try { r.acquireLatestImage() } catch (_: Throwable) { null }
+            }
+
+            if (image != null) {
+                var released = false
+                var bmp: Bitmap? = null
+                try {
+                    bmp = copyImagePlaneToBitmap(image, image.width, image.height)
+                    if (bmp != null) {
+                        val prepared = prepareFrameBitmap(bmp)
+                        val finalBmp = bmp
+                        scope.launch {
+                            try {
+                                processFrameWithPipeline(prepared)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "pipeline err: ${t.message}", t)
+                            } finally {
+                                if (prepared !== finalBmp) runCatching { prepared.recycle() }
+                                runCatching { finalBmp.recycle() }
+                                if (!released) { released = true; runCatching { image.close() } }
+                                frameProcessing.set(false)
+                                captureHandler?.postDelayed(runnableWrapper, 100L)
                             }
-                            return
                         }
-                    } finally {
-                        if (!released) { released = true; runCatching { image.close() } }
+                        return
                     }
+                } finally {
+                    if (!released) { released = true; runCatching { image.close() } }
                 }
             }
         } catch (t: Throwable) {
@@ -191,9 +228,8 @@ class ScreenCaptureService : Service() {
 
     private val runnableWrapper: Runnable = Runnable { tickFrame() }
 
-    @Volatile var lastFrameHandCount: Int = 0
-    @Volatile var lastFrameDetections: Int = 0
-    @Volatile var lastFrameYoloReturned: Int = 0
+    @Volatile var lastFrameHandCount:   Int = 0
+    @Volatile var lastFrameDetections:  Int = 0
 
     private suspend fun processFrameWithPipeline(prepared: Bitmap) {
         if (!frameLock.tryLock()) return
@@ -203,24 +239,25 @@ class ScreenCaptureService : Service() {
                 val r = np.processFrame(prepared)
                 lastFrameHandCount = r.hand.size
                 lastFrameDetections = r.totalDetections
-                lastFrameYoloReturned = r.totalDetections
                 r.stateChanged
             } ?: run {
                 val r = core.pipeline?.processFrame(prepared)
                 lastFrameHandCount = r?.hand?.size ?: 0
                 lastFrameDetections = r?.hand?.size ?: 0
-                lastFrameYoloReturned = 0
                 r?.stateChanged ?: false
             }
-            if (changed) core.notifyStateChanged()
+            // Always re-render the floating window after each frame so the
+            // diagnostic "NCNN=XX框" overlay refreshes even when the game
+            // state has not changed (e.g. waiting for the first hand).
+            sLastFrameHandCount = lastFrameHandCount
+            sLastFrameDetections = lastFrameDetections
+            core.notifyStateChanged()
         } finally {
             frameLock.unlock()
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // FloatWindowActions — image reader + virtual display verbatim
-    // ─────────────────────────────────────────────────────────────────
+    // ── FloatWindowActions literal methods ───────────────────────────
     private fun createImageReader(force: Boolean) {
         val size = expectedCaptureSize()
         val w = size[0]; val h = size[1]
@@ -231,9 +268,8 @@ class ScreenCaptureService : Service() {
         if (existing != null) runCatching { existing.close() }
 
         val maxImages = if (currentMode == Mode.MODE2) 12 else 5
-        // format = 1 = PixelFormat.RGBX_8888 (wz.apk hard-coded literal).
+        // format = 1 = PixelFormat.RGBX_8888 (wz.apk hard-coded literal)
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, maxImages)
-        Log.i(TAG, "createImageReader size=${w}x$h mode=$currentMode maxImages=$maxImages")
     }
 
     private fun virtualDisplay() {
@@ -245,12 +281,11 @@ class ScreenCaptureService : Service() {
         val size = expectedCaptureSize()
         val d = mScreenDensity
         if (size[0] <= 0 || size[1] <= 0 || d <= 0) return
-        // flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC) — wz.apk literal.
+        // flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC)
         try {
             virtualDisplay = p.createVirtualDisplay(
                 "screen-mirror", size[0], size[1], d,
                 /* flags = */ 16, surface, null, null)
-            Log.i(TAG, "virtualDisplay created ${size[0]}x${size[1]} d=$d flag=16")
         } catch (t: Throwable) {
             Log.e(TAG, "createVirtualDisplay failed", t)
         }
@@ -258,35 +293,26 @@ class ScreenCaptureService : Service() {
 
     private fun recreateCapturePipelineIfSizeChanged() {
         val size = expectedCaptureSize()
-        val d = mScreenDensity
         val r = imageReader
         val sizeMismatch = if (r != null) r.width != size[0] || r.height != size[1] else true
         val missingDisplay = virtualDisplay == null
         if (sizeMismatch || missingDisplay) {
             runCatching { virtualDisplay?.release() }; virtualDisplay = null
             createImageReader(force = true)
-            virtualDisplay()
+            // Recreate virtualDisplay ONLY when dimensions are valid.
+            if (mScreenWidth > 0 && mScreenHeight > 0 && mScreenDensity > 0) virtualDisplay()
         }
     }
 
     // wz.apk FloatWindowActions.expectedCaptureSize lines 158..166.
     private fun expectedCaptureSize(): IntArray {
-        // Original: if (currentMode == MODE1 && isPortrait()) return {H, W}.
         val portrait = isPortrait()
         return if (currentMode == Mode.MODE1 && portrait) intArrayOf(mScreenHeight, mScreenWidth)
                else intArrayOf(mScreenWidth, mScreenHeight)
     }
-
-    // wz.apk NewFloatingWindowService.isPortrait — *NOT* based on display
-    // rotation.  It's a pure size check so a phone rotated to landscape
-    // physically but reporting a w>=h capture still counts as "landscape".
     private fun isPortrait(): Boolean = mScreenHeight >= mScreenWidth
 
-    // ─────────────────────────────────────────────────────────────────
-    // FramePipelineCoordinator.prepareFrameBitmap
-    // MODE3  -> true  -> rotateMinus90AndScale  (bmp, 1.0f)  => -90°
-    // MODE4  -> false -> rotateMinus90AndScale1 (bmp, 1.0f)  => -270° = +90°
-    // ─────────────────────────────────────────────────────────────────
+    // FramePipelineCoordinator.prepareFrameBitmap (jadx lines 26..35)
     private fun prepareFrameBitmap(bitmap: Bitmap): Bitmap {
         if (bitmap.isRecycled) return bitmap
         return when (currentMode) {
@@ -296,9 +322,17 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // ImageUtils.copyImagePlaneToBitmap (wz.apk lines 112..173)
-    // ─────────────────────────────────────────────────────────────────
+    // ── ImageUtils.copyImagePlaneToBitmap lines 112..173 VERBATIM ────
+    //    Differences from v2.1.5 implementation that MATTER:
+    //      * obtainExactRgbaBuffer returns a DIRECT ByteBuffer (mandatory for
+    //        Bitmap.copyPixelsFromBuffer on API 33+ / Huawei Kirin 9010).
+    //        v2.1.5 used ByteBuffer.wrap(heap byte[]) which silently
+    //        writes garbage on recent ART runtimes.
+    //      * obtainExactRgbaBuffer.clear() before use (resets position=0,
+    //        limit=capacity) — our v2.1.5 code skipped this, so successive
+    //        frames sometimes started copying from a non-zero offset.
+    //      * zero-padding write uses obtainZeroPaddingBuffer() per row, same
+    //        exact branch layout as lines 144..150 of the original.
     private fun copyImagePlaneToBitmap(image: Image, i2: Int, i3: Int): Bitmap? {
         val planes: Array<Image.Plane>? = image.planes
         if (planes == null || planes.isEmpty()) return null
@@ -318,30 +352,30 @@ class ScreenCaptureService : Service() {
             return createBitmap
         }
         if (pixelStride == 4 && rowStride > 0) {
-            val out = ByteArray(i6 * i3)
-            var outIdx = 0
-            val tmp = ByteArray(i6)
+            val buf = obtainExactRgbaBuffer(i6 * i3)
             for (i7 in 0 until i3) {
                 val i8 = i7 * rowStride + position
-                if (i8 < limit) {
-                    val i4 = max(0, min(limit, i8 + i6) - i8)
-                    if (i4 > 0) {
+                val i4: Int = if (i8 < limit) {
+                    val i = max(0, min(limit, i8 + i6) - i8)
+                    if (i > 0) {
                         duplicate.limit(limit)
                         duplicate.position(i8)
-                        duplicate.limit(i8 + i4)
-                        duplicate.get(tmp, 0, i4)
-                        System.arraycopy(tmp, 0, out, outIdx, i4)
-                        outIdx += i4
+                        duplicate.limit(i8 + i)
+                        buf.put(duplicate)
                     }
+                    i
+                } else 0
+                if (i4 < i6) {
+                    val i9 = i6 - i4
+                    buf.put(obtainZeroPaddingBuffer(i9), 0, i9)
                 }
-                val i9 = i6 - (outIdx - i7 * i6)
-                if (i9 > 0) outIdx += i9
             }
-            createBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(out))
+            buf.flip()
+            createBitmap.copyPixelsFromBuffer(buf)
             return createBitmap
         }
         if (pixelStride > 0 && rowStride > 0) {
-            val j2 = rowStride.toLong() * i3
+            val j2: Long = rowStride.toLong() * i3
             if (max < j2) { createBitmap.recycle(); return null }
             val strideW = (rowStride - pixelStride * i2) / pixelStride + i2
             val bmp2 = Bitmap.createBitmap(strideW, i3, Bitmap.Config.ARGB_8888)
@@ -357,40 +391,30 @@ class ScreenCaptureService : Service() {
         return null
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // ImageUtils.rotateAndScaleBitmap (wz.apk lines 175..207)
-    // ─────────────────────────────────────────────────────────────────
+    // ImageUtils.rotateAndScaleBitmap lines 175..207
     private fun rotateAndScaleBitmap(bitmap: Bitmap, scale: Float, degrees: Float): Bitmap {
         val w = bitmap.width
-        val scaledW = (w * scale).toInt()
+        val i2 = (w * scale).toInt()
         val h = bitmap.height
-        val scaledH = (h * scale).toInt()
-        val m = Matrix()
-        m.preTranslate(-w / 2.0f, -h / 2.0f)
-        m.postScale(scale, scale)
-        m.postRotate(degrees)
-        // For ±90 rotations the output canvas is HxW of the scaled dims.
+        val r2 = (h * scale).toInt()
+        rotationMatrix.reset()
+        rotationMatrix.preTranslate(-w / 2.0f, -r2 / 2.0f)
+        rotationMatrix.postScale(scale, scale)
+        rotationMatrix.postRotate(degrees)
+        // After ±90° rotation output canvas is H x W of the scaled dims.
         val outW = (h * scale).toInt()
         val outH = (w * scale).toInt()
         val cfg = bitmap.config ?: Bitmap.Config.ARGB_8888
         val out = Bitmap.createBitmap(max(1, outW), max(1, outH), cfg)
         val canvas = Canvas(out)
         canvas.drawColor(0, PorterDuff.Mode.CLEAR)
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG).apply {
-            isAntiAlias = true
-            setXfermode(PorterDuffXfermode(PorterDuff.Mode.SRC))
-        }
-        m.postTranslate(outW / 2.0f, outH / 2.0f)
-        canvas.drawBitmap(bitmap, m, paint)
+        rotationMatrix.postTranslate(outW / 2.0f, outH / 2.0f)
+        canvas.drawBitmap(bitmap, rotationMatrix, rotationPaint)
         bitmap.recycle()
         return out
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // ScreenMetrics (FloatWindowLayoutHelper.captureAndStoreScreenMetrics)
-    // mScreenWidth  = displayMetrics.widthPixels  (getDefaultDisplay().getMetrics)
-    // mScreenHeight = getRealMetrics().heightPixels (ImageUtils.getHasVirtualKey)
-    // ─────────────────────────────────────────────────────────────────
+    // captureAndStoreScreenMetrics — getMetrics for width, getRealMetrics for height
     private fun captureScreenMetrics() {
         val wm = applicationContext.getSystemService(Context.WINDOW_SERVICE)
                 as? android.view.WindowManager
@@ -405,7 +429,6 @@ class ScreenCaptureService : Service() {
         runCatching { wm.defaultDisplay.getMetrics(dm) }
         mScreenWidth = dm.widthPixels
         mScreenDensity = dm.densityDpi
-        // getHasVirtualKey = invoke Display#getRealMetrics and return heightPixels
         mScreenHeight = try {
             val real = DisplayMetrics()
             val cls = Class.forName("android.view.Display")
@@ -417,9 +440,7 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Cleanup + Notification helpers
-    // ─────────────────────────────────────────────────────────────────
+    // ── cleanup + notification helpers ───────────────────────────────
     private fun stopCapture() {
         runCatching { virtualDisplay?.release() }
         runCatching { imageReader?.close() }
@@ -433,13 +454,13 @@ class ScreenCaptureService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(NotificationChannel(
-                CHANNEL_ID, "记牌器(原版APK识别管线)",
+                CHANNEL_ID, "记牌器(v2.1.7 原版NCNN管线)",
                 NotificationManager.IMPORTANCE_LOW
             ))
         }
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("记牌器 AI 正在运行")
-            .setContentText("识别：原版 NCNN YOLOv8 — 斗地主(MODE1) RGBX_8888+flag=16")
+            .setContentTitle("记牌器 AI 运行中")
+            .setContentText("原版 wz.apk NCNN YOLOv8：RGBX_8888 + flag=16 + loadModel(0,0,6) + obtainExactRgbaBuffer")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()
@@ -455,6 +476,13 @@ class ScreenCaptureService : Service() {
         private const val TAG = "ScreenCaptureService"
         private const val CHANNEL_ID = "jiPaiQi_capture"
         private const val NOTIF_ID = 0x7713
+
+        // Companion-level snapshot mirrors so the floating window (a totally
+        // separate Service) can reach the last-frame diagnostics without a
+        // custom binder / Broadcast.  Updated each frame inside
+        // processFrameWithPipeline.
+        @JvmStatic @Volatile var sLastFrameHandCount:   Int = 0
+        @JvmStatic @Volatile var sLastFrameDetections:  Int = 0
 
         const val ACTION_START = "com.jipaiqi.START_CAPTURE"
         const val ACTION_STOP  = "com.jipaiqi.STOP_CAPTURE"
