@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Provider paths for sharing debug log files via androidx.core.content.FileProvider.
+     Shares files under:
+       - external-cache-path (most common: /sdcard/Android/data/<pkg>/cache)
+       - cache-path        (fallback if external storage unavailable) -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-cache-path name="external_cache_logs" path="." />
+    <cache-path        name="internal_cache_logs" path="." />
+    <files-path        name="files_logs"          path="." />
+    <external-files-path name="external_files_logs" path="." />
+</paths>

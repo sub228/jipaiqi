@@ -1,11 +1,11 @@
 package com.jipaiqi.doudizhu.ai
 
 import android.graphics.Bitmap
-import android.util.Log
 import com.example.qnjisuanqi.YoloAPI
 import com.jipaiqi.doudizhu.ai.Position.LANDLORD
 import com.jipaiqi.doudizhu.ai.Position.LANDLORD_DOWN
 import com.jipaiqi.doudizhu.ai.Position.LANDLORD_UP
+import com.jipaiqi.doudizhu.util.DLog
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -50,6 +50,18 @@ class NativeYoloPipeline(
     private var lastTableSig: String? = null
     private var emptyTableFrames = 0
 
+    /** v2.1.9 诊断镜像：设置页 / DebugLogCollector 直接读取上一帧结果。 */
+    @Volatile var lastDetectCount: Int = 0
+    @Volatile var lastHandCount:   Int = 0
+
+    fun reset() {
+        lastTableSig = null
+        emptyTableFrames = 0
+        adaptiveHandYTopPx = -1
+        lastDetectCount = 0
+        lastHandCount = 0
+    }
+
     data class Cluster(val cards: MutableList<YoloAPI.Obj> = mutableListOf()) {
         var yMin = Float.POSITIVE_INFINITY
         var yMax = Float.NEGATIVE_INFINITY
@@ -86,7 +98,7 @@ class NativeYoloPipeline(
         val dets: Array<YoloAPI.Obj> = try {
             yolo.Detect(frame, true) ?: emptyArray()
         } catch (t: Throwable) {
-            Log.e(TAG, "Native YOLO Detect crashed — " +
+            DLog.e(TAG, "Native YOLO Detect crashed — " +
                     "libyolov8ncnn.so present? yolo_n.bin in assets? ${t.message}", t)
             return FrameResult(emptyList(), emptyList(), 0, false, adaptiveHandYTopPx)
         }
@@ -99,18 +111,18 @@ class NativeYoloPipeline(
             lastDetectLogMs = now
             val rows = dets.size
             if (rows == 0) {
-                Log.w(TAG, "[DETECT=0] bitmap=${w}x${h}@${frame.config} " +
+                DLog.w(TAG, "[DETECT=0] bitmap=${w}x${h}@${frame.config} " +
                         "rowBytes=${frame.rowBytes} byteCount=${frame.byteCount} " +
                         "isRecycled=${frame.isRecycled} " +
                         "handRowTopPct=${screen.handRowTopPct} " +
                         "expectedHandCards=${screen.expectedHandCards} " +
-                        "screen.regions=${screen}")
+                        "platform=${screen.currentPlatform.name}")
             } else {
                 val head = dets.asSequence().take(5).map { o ->
                     "L${o.label}/${o.labelName}@(${o.x.toInt()},${o.y.toInt()})" +
                             "${o.w.toInt()}x${o.h.toInt()}p=%.2f".format(o.prob)
                 }.joinToString("  ")
-                Log.i(TAG, "[DETECT=$rows] first5=$head  screen=${w}x${h} " +
+                DLog.i(TAG, "[DETECT=$rows] first5=$head  screen=${w}x${h} " +
                         "yMax=${dets.maxOfOrNull { it.y }?.toInt()} " +
                         "yMin=${dets.minOfOrNull { it.y }?.toInt()}")
             }
@@ -145,9 +157,9 @@ class NativeYoloPipeline(
             val rowDiag = rows.joinToString(" | ") { c ->
                 "${c.cards.size}boxes@yMean=${c.yMean.toInt()}"
             }
-            Log.i(TAG, "[CLUSTER] rows=${rows.size} minHandCards=$minHandCards " +
+            DLog.i(TAG, "[CLUSTER] rows=${rows.size} minHandCards=$minHandCards " +
                     "handRowTopPct=${screen.handRowTopPct} cutLinePx=$handTopLine " +
-                    "bitmap=$w x $h → rows=$rowDiag")
+                    "platform=${screen.currentPlatform.name} bitmap=$w x $h → rows=$rowDiag")
         }
 
         // ── Hand row = largest cluster with yMean >= 0.66h (screenAdaptions.json 66%) ──
@@ -222,13 +234,16 @@ class NativeYoloPipeline(
             }
         }
 
-        return FrameResult(
+        val res = FrameResult(
             hand = handRanks.sorted(),
             tablePlay = mergedRanks,
             totalDetections = dets.size,
             stateChanged = stateChanged || playRecorded || tableCleared,
             handYTopPx = adaptiveHandYTopPx
         )
+        lastDetectCount = res.totalDetections
+        lastHandCount   = res.hand.size
+        return res
     }
 
     /**

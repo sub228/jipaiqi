@@ -1,0 +1,59 @@
+## v2.1.9 新增：APP 内置调试日志 + 游戏平台选择（与原版 wz.apk 对齐）
+
+### 🆕 两大功能（用户要求 + 原版 APK 都有）
+
+#### ① 🆘 APP 内置调试日志（不再需要 ADB）
+- 内存环形 2500 行 + 磁盘 `/sdcard/Android/data/<pkg>/cache/debug_log_yyyyMMdd.txt` 双通道
+- 悬浮窗**⚙️设置按钮长按** → 弹出 SettingsDialog → Tab2：📋 调试日志
+  - 实时滚动文本框（每 900ms 自动刷新 + 自动滚动到底部）
+  - 顶部状态条：平台 / NCNN OK / detCnt / handCnt / 屏幕分辨率 / 日志行数
+  - 4 个按钮：
+    - 📋 **复制全部** → 一键拷贝到剪贴板（微信/QQ 直接粘贴发给我就行）
+    - 🗑 清空
+    - 📤 **分享文件** → 调起系统分享（微信 / 邮箱 / 蓝牙等）
+    - ⚡ **强制触发 1 次检测快照** → 在日志里打印完整环境快照头 + 平台/参数/NCNN/lastFrame 信息，下帧检测结果就会自然进入
+- 所有 `Log.i/w/e/d` → 全部换为 `DLog.*`（同时写 logcat + 收集器）
+- DebugLogCollector.snapshotString() 自带 4 行状态头（app nativeYoloReady / ncnnArgs / pipeline last detCnt+handCnt+platform+handRowTopPct）
+
+#### ② 🎮 游戏平台选择（原版 APK 的核心功能）
+新增 7 种平台，每种单独定义 handRowTopPct、左右对手头像区、地主底牌条位置。  
+悬浮窗⚙️长按 → Tab1：🎮 平台选择，选中即：
+  - SharedPreferences 持久化保存
+  - 立即 `ScreenAdaptation.applyPlatform` → 下一帧就用新手牌线
+  - 自动 `pipeline.reset()` + `state.newGame()` 清空旧聚类
+
+| 平台 | handRowTopPct | 适用包名 |
+|---|---|---|
+| 欢乐斗地主 (腾讯) 【默认推荐 - 用户截图就是这个】 | 66% | com.qqgame.hlddz / com.tencent.tmgp.doudizhu |
+| 微乐斗地主 | 62% | com.weile.ddz |
+| JJ斗地主 (原版 screenAdaptions.json 定义) | 66% | cn.jj |
+| 途游斗地主 | 64% | com.tuyoogame.ddz |
+| 抖音斗地主小程序 | 68% | com.ss.android.ugc.aweme / 小程序 |
+| 微信斗地主小程序 | 68% | com.tencent.mm 小程序 |
+| 通用 (自动识别, 默认兜底) | 66% | 其他平台通用 |
+
+**如果识别不到牌，第一件事：⚙️长按 → Tab1 切到 "欢乐斗地主 (腾讯)" 试试！**  
+很多识别为空其实是 handRowTopPct 对不上：比如 66% 表示「屏幕顶部 66% 高度以下的区域才算手牌」，不同 UI 的手牌布局高度差 2~4 个百分点就导致 handRow 一个簇都选不上。
+
+---
+
+### 🔧 代码层面的小修补
+- JiPaiQiApp Core.ensureReady() 写入 lastLoadArgs/lastLoadOk/lastInitOk 后同步 mirror 到 companion（便于 Dialog/日志收集器读取）
+- NativeYoloPipeline 新增 lastDetectCount / lastHandCount @Volatile 字段 + reset() 方法
+- SettingsAndLogDialog 支持 TYPE_APPLICATION_OVERLAY（系统弹窗），90% 屏幕宽 + 78% 高 + 半透明背景
+- AndroidManifest 加了 `androidx.core.content.FileProvider` 授权（authorities = $applicationId.fileprovider），res/xml/file_paths.xml 配好 4 种分享路径
+- 原有 [FRAME] OK / [STALL-CHECK] / [DETECT=0] / [DETECT=N] / [CLUSTER] 等 TAG 全部通过 DLog 进入收集器，设置页里直接看
+
+---
+
+## 使用步骤（快速定位识别问题）
+1. 安装 v2.1.9 启动 → 授权录屏 & 悬浮窗 → 进入欢乐斗地主手牌界面停留 30 秒
+2. **长按**悬浮窗左上⚙️（不要单击，单击是切换功能按钮行）
+3. 先看 Tab1：🎮平台选择 → 当前选中的必须是「欢乐斗地主 (腾讯)」+ ✅
+4. 切 Tab2：📋调试日志 → 看顶部状态条：
+   - NCNN=OK? 
+   - detCnt 应该 > 20（用户截图 17 张手牌，NCNN 一般会检出 25~45 个框）
+   - 如果 detCnt=0 → 点 ⚡强制触发 1 次检测快照，等 2 秒再看
+5. 点 📋 **复制全部** → 粘贴发回给我（或点📤分享文件），1 分钟内就能定位
+
+下载：jipaiqi-v2.1.9-platforms+applog-debug.apk (162MB, Debug)

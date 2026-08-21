@@ -29,6 +29,8 @@ import com.jipaiqi.doudizhu.ai.MoveType
 import com.jipaiqi.doudizhu.ai.Position
 import com.jipaiqi.doudizhu.databinding.FloatingCellBinding
 import com.jipaiqi.doudizhu.databinding.FloatingPanelBinding
+import com.jipaiqi.doudizhu.ui.SettingsAndLogDialog
+import com.jipaiqi.doudizhu.util.DLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -166,8 +168,21 @@ class FloatingWindowService : Service() {
 
     /** Wire up every pill button + the settings gear + collapsed expander. */
     private fun wireButtons(b: FloatingPanelBinding) {
-        // Settings gear -> toggle the function-pill row.
+        // Settings gear:
+        //   单击 = 原版行为：toggle function-pill row (showset)
+        //   长按 = v2.1.9：弹出「🎮平台选择 / 📋调试日志」内嵌对话框
+        //                 （无需 ADB，直接在 APP 内复制/分享日志）
         b.setting.setOnClickListener { toggle(b.showset) }
+        b.setting.setOnLongClickListener {
+            runCatching {
+                DLog.i(TAG, "⚙️ long-pressed: opening SettingsAndLogDialog (v2.1.9)")
+                val dlg = SettingsAndLogDialog(this)
+                dlg.show()
+                true
+            }.onFailure { t ->
+                DLog.e(TAG, "SettingsAndLogDialog failed to show", t)
+            }.getOrDefault(true)
+        }
 
         b.llHead6.setOnClickListener {      // AI建议
             aiPanelOn = !aiPanelOn
@@ -365,7 +380,7 @@ class FloatingWindowService : Service() {
                     com.jipaiqi.doudizhu.ai.heuristicBestSingle(snapshot)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "AI recommend failed: ${e.message}"); null
+                DLog.w(TAG, "AI recommend failed: ${e.message}"); null
             }
             mainHandler.post {
                 if (rec == null) {

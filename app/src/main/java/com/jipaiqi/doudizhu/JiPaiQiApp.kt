@@ -1,7 +1,6 @@
 package com.jipaiqi.doudizhu
 
 import android.app.Application
-import android.util.Log
 import com.example.qnjisuanqi.YoloAPI
 import com.example.qnjisuanqi.Yolov8Ncnn
 import com.jipaiqi.doudizhu.ai.CardDetector
@@ -12,6 +11,8 @@ import com.jipaiqi.doudizhu.ai.NativeYoloPipeline
 import com.jipaiqi.doudizhu.ai.Position
 import com.jipaiqi.doudizhu.ai.RecognitionPipeline
 import com.jipaiqi.doudizhu.ai.ScreenAdaptation
+import com.jipaiqi.doudizhu.util.DebugLogCollector
+import com.jipaiqi.doudizhu.util.DLog
 
 /**
  * Application singleton + shared runtime state.
@@ -30,17 +31,27 @@ class JiPaiQiApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // 2.1.9: 初始化双通道日志收集器（内存2500行环形 + 磁盘debug_log_yyyyMMdd.txt）
+        // 必须在任何 DLog 之前 init
+        runCatching { DebugLogCollector.init(this) }
         // Force ScreenAdaptation to parse once on the UI thread; reads from
         // assets/ which needs a live Context.
         runCatching { ScreenAdaptation.instance }
         core = Core(this)
-        Log.i(TAG, "JiPaiQiApp initialized")
+        DLog.i(TAG, "JiPaiQiApp initialized. platform=${ScreenAdaptation.instance.currentPlatform.displayName}")
     }
 
     companion object {
         private const val TAG = "JiPaiQiApp"
         @Volatile lateinit var instance: JiPaiQiApp
             private set
+
+        // ── 诊断镜像（v2.1.9）：让 APP 内的 DebugLogCollector / 设置页
+        // 能在静态上下文（object / FileProvider shareIntent builder）里直接读取，
+        // 不必持有 Core 引用。每次 Core.ensureReady() 写入后保持同步更新。 ──
+        @Volatile var lastLoadArgs: Triple<Int, Int, Int>? = null
+        @Volatile var lastLoadOk:   Boolean = false
+        @Volatile var lastInitOk:   Boolean = false
     }
 
     class Core(private val app: Application) {
@@ -130,27 +141,31 @@ class JiPaiQiApp : Application() {
                         loader.loadModel(app.assets, args.first, args.second, args.third)
                     }.getOrDefault(false)
                     lastLoadArgs = args; lastLoadOk = loadOk
-                    Log.i(TAG, "[NCNN-LOAD] try(${args.first},${args.second},${args.third}) " +
+                    // mirror to companion so SettingsAndLogDialog / DebugLogCollector can read
+                    JiPaiQiApp.lastLoadArgs = args
+                    JiPaiQiApp.lastLoadOk   = loadOk
+                    DLog.i(TAG, "[NCNN-LOAD] try(${args.first},${args.second},${args.third}) " +
                             "→ loadModel=$loadOk")
                     if (!loadOk) continue
                     val api = YoloAPI()
                     val initOk = runCatching { api.Init() }.getOrDefault(false)
                     lastInitOk = initOk
-                    Log.i(TAG, "           → YoloAPI.Init()=$initOk")
+                    JiPaiQiApp.lastInitOk = initOk
+                    DLog.i(TAG, "           → YoloAPI.Init()=$initOk")
                     if (initOk) { picked = args to api; break }
                 }
                 if (picked == null) throw IllegalStateException(
                     "[NCNN-LOAD] FAIL: all attempts failed. " +
                             "last args=$lastLoadArgs load=$lastLoadOk init=$lastInitOk; " +
                             "see ABI filter in build.gradle.kts (arm64-v8a+armeabi-v7a only)")
-                Log.i(TAG, "[NCNN-LOAD] PICKED (ai=${picked.first.first}, " +
+                DLog.i(TAG, "[NCNN-LOAD] PICKED (ai=${picked.first.first}, " +
                         "cpu=${picked.first.second}, plat=${picked.first.third}).  " +
                         "If frames still return DETECT=0, the issue is in " +
                         "ImageReader/prepareFrameBitmap (see ScreenCaptureService " +
                         "[FRAME] / [STALL-CHECK] logs).")
                 picked.second
             }.getOrElse { t ->
-                Log.e(TAG, "Native YOLO failed: ${t.message}", t); null
+                DLog.e(TAG, "Native YOLO failed: ${t.message}", t); null
             }
             nativeYoloReady = nativeYolo != null
 
@@ -173,7 +188,7 @@ class JiPaiQiApp : Application() {
                 it.hasModel(Position.LANDLORD_DOWN)
             } ?: false
             ready = true
-            Log.i(TAG, "Core ready: nativeYolo=$nativeYoloReady " +
+            DLog.i(TAG, "Core ready: nativeYolo=$nativeYoloReady " +
                 "yolo=${yolo != null} douZero=${douZero != null} models=$modelsPresent")
         }
 

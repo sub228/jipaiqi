@@ -25,11 +25,11 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.jipaiqi.doudizhu.JiPaiQiApp
 import com.jipaiqi.doudizhu.R
 import com.jipaiqi.doudizhu.ai.Position
+import com.jipaiqi.doudizhu.util.DLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -164,7 +164,7 @@ class ScreenCaptureService : Service() {
 
         captureHandler?.post(runnableWrapper)
 
-        Log.i(TAG, "start mode=$currentMode " +
+        DLog.i(TAG, "start mode=$currentMode " +
                 "screen=${mScreenWidth}x${mScreenHeight}@${mScreenDensity}dpi " +
                 "reader=${imageReader?.width}x${imageReader?.height} " +
                 "nativeYoloReady=${app.nativeYoloReady}")
@@ -200,7 +200,7 @@ class ScreenCaptureService : Service() {
             if (imageReader == null ||
                 mScreenWidth != lastSeenW || mScreenHeight != lastSeenH ||
                 mScreenDensity != lastSeenDpi) {
-                Log.i(TAG, "[FRAME] screen dims changed ${lastSeenW}x${lastSeenH}@${lastSeenDpi} → " +
+                DLog.i(TAG, "[FRAME] screen dims changed ${lastSeenW}x${lastSeenH}@${lastSeenDpi} → " +
                         "${mScreenWidth}x${mScreenHeight}@${mScreenDensity}; recreating pipeline")
                 lastSeenW = mScreenWidth; lastSeenH = mScreenHeight
                 lastSeenDpi = mScreenDensity
@@ -253,7 +253,7 @@ class ScreenCaptureService : Service() {
                     processFrameWithPipeline(prepared)
                 }
             }.onFailure { t ->
-                Log.w(TAG, "[FRAME] sync pipeline err: ${t.message}", t)
+                DLog.w(TAG, "[FRAME] sync pipeline err: ${t.message}", t)
             }
 
             // 每 ~3 秒（原版 CAPTURE_DEBUG_LOG_INTERVAL_MS=1000，这里放宽到 3 秒
@@ -261,18 +261,18 @@ class ScreenCaptureService : Service() {
             val now = System.currentTimeMillis()
             if (now - lastDebugLogMs > 3000L) {
                 lastDebugLogMs = now
-                Log.i(TAG, "[FRAME] OK bitmaps: raw=${bmp.width}x${bmp.height}@${bmp.config} " +
+                DLog.i(TAG, "[FRAME] OK bitmaps: raw=${bmp.width}x${bmp.height}@${bmp.config} " +
                         "prepared=${prepared.width}x${prepared.height} reader=${ir.width}x${ir.height} " +
                         "screen=${mScreenWidth}x${mScreenHeight}@${mScreenDensity}dpi " +
                         "detCnt=$sLastFrameDetections handCnt=$sLastFrameHandCount " +
-                        "nullRate=${totalNulls*100.0/max(1,totalAttempts)}%.1f " +
+                        "nullRate=${"%.1f".format(totalNulls*100.0/max(1,totalAttempts))}% " +
                         "totalAttempts=$totalAttempts mode=$currentMode " +
                         "vDensityLast=$lastVirtualDisplayDensity")
             }
 
             if (prepared !== bmp) runCatching { prepared.recycle() }
         } catch (t: Throwable) {
-            Log.e(TAG, "[FRAME] capture loop failed", t)
+            DLog.e(TAG, "[FRAME] capture loop failed", t)
             // 原版 ScreenCaptureMonitorCoordinator.reportIssue
             handleFrameStallIfNeeded()
         } finally {
@@ -314,20 +314,20 @@ class ScreenCaptureService : Service() {
         }.getOrNull() ?: "unknown"
 
         val core = runCatching { (application as JiPaiQiApp).core }.getOrNull()
-        Log.w(TAG, "═══════════════════════════════════════════════════════")
-        Log.w(TAG, "[STALL-CHECK] ${if (lastFrameOkMs == 0L) "no-successful-frame-yet (启动后)" else "stuck>5s  since_last_ok"}")
-        Log.w(TAG, "  ScreenMetrics w=$mScreenWidth h=$mScreenHeight dpi=$mScreenDensity " +
+        DLog.w(TAG, "═══════════════════════════════════════════════════════")
+        DLog.w(TAG, "[STALL-CHECK] ${if (lastFrameOkMs == 0L) "no-successful-frame-yet (启动后)" else "stuck>5s  since_last_ok"}")
+        DLog.w(TAG, "  ScreenMetrics w=$mScreenWidth h=$mScreenHeight dpi=$mScreenDensity " +
                 "portrait=${isPortrait()} expectedSz=${expectedCaptureSize().joinToString("x")}")
-        Log.w(TAG, "  imageReader=$irW x $irH fmt=$irFmt (1=RGBX_8888) maxImages=5")
-        Log.w(TAG, "  imageReader acquireLatestImage()  → $irPlanesStr")
-        Log.w(TAG, "  projection=${projection != null} vd=${virtualDisplay != null} " +
+        DLog.w(TAG, "  imageReader=$irW x $irH fmt=$irFmt (1=RGBX_8888) maxImages=5")
+        DLog.w(TAG, "  imageReader acquireLatestImage()  → $irPlanesStr")
+        DLog.w(TAG, "  projection=${projection != null} vd=${virtualDisplay != null} " +
                 "vdDensity=$lastVirtualDisplayDensity vs screenDensity=$mScreenDensity")
-        Log.w(TAG, "  currentMode=$currentMode; extractNativeLibs=true ABI=arm64-v8a")
-        Log.w(TAG, "  NativeYoloReady=${core?.nativeYoloReady ?: false}")
-        Log.w(TAG, "  totalAttempts=$totalAttempts; nullImg=$totalNulls nullBmp=$totalBitmapNulls; " +
-                "nullImgRate=${totalNulls * 100.0 / max(1, totalAttempts)}%.1f")
-        Log.w(TAG, "  detCnt=$sLastFrameDetections handCnt=$sLastFrameHandCount")
-        Log.w(TAG, "═══════════════════════════════════════════════════════")
+        DLog.w(TAG, "  currentMode=$currentMode; extractNativeLibs=true ABI=arm64-v8a")
+        DLog.w(TAG, "  NativeYoloReady=${core?.nativeYoloReady ?: false}")
+        DLog.w(TAG, "  totalAttempts=$totalAttempts; nullImg=$totalNulls nullBmp=$totalBitmapNulls; " +
+                "nullImgRate=${"%.1f".format(totalNulls * 100.0 / max(1, totalAttempts))}%")
+        DLog.w(TAG, "  detCnt=$sLastFrameDetections handCnt=$sLastFrameHandCount")
+        DLog.w(TAG, "═══════════════════════════════════════════════════════")
     }
 
     /** 频率限流（每 1000ms 最多 1 条）的 capture debug 日志，
@@ -336,7 +336,7 @@ class ScreenCaptureService : Service() {
         val now = System.currentTimeMillis()
         if (now - lastDebugLogMs < 1000L) return
         lastDebugLogMs = now
-        Log.d(TAG, "[CAPTURE:$reason] $detail")
+        DLog.d(TAG, "[CAPTURE:$reason] $detail")
     }
 
     @Volatile var lastFrameHandCount:   Int = 0
@@ -380,7 +380,7 @@ class ScreenCaptureService : Service() {
 
         val maxImages = if (currentMode == Mode.MODE2) 12 else 5
         // format = 1 = PixelFormat.RGBX_8888 (wz.apk hard-coded literal)
-        Log.i(TAG, "[CAPTURE:create_ir] mode=$currentMode size=${w}x${h} " +
+        DLog.i(TAG, "[CAPTURE:create_ir] mode=$currentMode size=${w}x${h} " +
                 "format=RGBX_8888(1) maxImages=$maxImages force=$force " +
                 "screen=${mScreenWidth}x${mScreenHeight} portrait=${isPortrait()}")
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, maxImages)
@@ -391,25 +391,25 @@ class ScreenCaptureService : Service() {
         val r = imageReader ?: return
         val surface = runCatching { r.surface }.getOrNull()
         if (surface == null || !surface.isValid) {
-            Log.w(TAG, "[CAPTURE:vd_invalid] surface=$surface isValid=${surface?.isValid}")
+            DLog.w(TAG, "[CAPTURE:vd_invalid] surface=$surface isValid=${surface?.isValid}")
             return
         }
         if (virtualDisplay != null) return
         val size = expectedCaptureSize()
         val d = mScreenDensity
         if (size[0] <= 0 || size[1] <= 0 || d <= 0) {
-            Log.w(TAG, "[CAPTURE:vd_invalid] size=${size.joinToString("x")} density=$d")
+            DLog.w(TAG, "[CAPTURE:vd_invalid] size=${size.joinToString("x")} density=$d")
             return
         }
         // flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC)
         try {
-            Log.i(TAG, "[CAPTURE:create_vd] mode=$currentMode size=${size[0]}x${size[1]} density=$d flag=16")
+            DLog.i(TAG, "[CAPTURE:create_vd] mode=$currentMode size=${size[0]}x${size[1]} density=$d flag=16")
             virtualDisplay = p.createVirtualDisplay(
                 "screen-mirror", size[0], size[1], d,
                 /* flags = */ 16, surface, null, null)
             lastVirtualDisplayDensity = d
         } catch (t: Throwable) {
-            Log.e(TAG, "createVirtualDisplay failed", t)
+            DLog.e(TAG, "createVirtualDisplay failed", t)
         }
     }
 
@@ -428,7 +428,7 @@ class ScreenCaptureService : Service() {
         }.getOrDefault(true)
         val missingDisplay = virtualDisplay == null
         if (sizeMismatch || densityMismatch || surfaceInvalid || missingDisplay) {
-            Log.i(TAG, "[CAPTURE:recreate_pipeline] sizeMismatch=$sizeMismatch " +
+            DLog.i(TAG, "[CAPTURE:recreate_pipeline] sizeMismatch=$sizeMismatch " +
                     "densityMismatch=$densityMismatch (prev=$lastVirtualDisplayDensity " +
                     "now=$mScreenDensity) surfaceInvalid=$surfaceInvalid " +
                     "missingVD=$missingDisplay expected=${size[0]}x${size[1]}")
