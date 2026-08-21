@@ -1,0 +1,69 @@
+## v2.2.0 修复用户日志里的 3 个 ROOT CAUSE
+
+**从 v2.1.9 用户日志里精确找到 3 个 bug，都是「绿灯亮、NCNN 已就绪(0,0,6) load=true init=true → 但 detCnt 永远=0」的根因：**
+
+---
+
+### 🔴 Bug 1 (最严重)：**无限重建死循环**
+```
+[FRAME] screen dims changed 2710x1320@540 → 2710x1320@540; recreating pipeline   ← 每 100ms 1 次！连打 3 分钟！
+```
+tickFrame 里 `imageReader == null` 也被纳入「dims changed」条件，结果每次 recreate 一失败（SecurityException）就 imageReader 还等于 null → 下一个 tick 又 recreate → 又 fail → 100ms 后再来…… 3 分钟循环了 1800 次。
+
+**v2.2.0 修：**
+1. 把「屏幕真变了」和「imageReader 空」分开判断，只有真变了才打 "screen dims changed" 那行
+2. `imageReader == null` 时只打限频 debug 行，然后进 recreate 但 recreate 函数里新加：
+   - 同错误场景最小 **RECREATE_MIN_INTERVAL_MS = 2000ms**（2 秒才允许尝试一次），防止 1800 次/分 的 hammering
+   - 重建结果 `virtualDisplay()` 返回 Boolean，失败就 `consecutiveRecreateFails += 1`，成功则置 0
+
+---
+
+### 🔴 Bug 2 (致命 Android 14 特有)：SecurityException
+```
+E/ScreenCaptureService: createVirtualDisplay failed
+    java.lang.SecurityException: Don't re-use the resultData to retrieve the same projection instance,
+    and don't use a token that has timed out.
+    Don't take multiple captures by invoking MediaProjection#createVirtualDisplay multiple times
+    on the same instance.
+```
+Android 14 的 MediaProjection Binder token 是**一次性**的：对同一个 projection 实例，createVirtualDisplay() 只能成功一次，之后只要旧 VD 被 release、再在同一个 projection 上想 createVD 就直接 SecurityException。我们在 Bug 1 的无限循环里第一次失败后，再想重试当然永远 SecurityException。
+
+**v2.2.0 修：**
+1. `startCapture()` 里存 `savedProjectionResultCode = rc`, `savedProjectionData = Intent(data)`（防御性 copy）
+2. `consecutiveRecreateFails >= 2` 时调用新增的 `renewMediaProjectionInstance()`：
+   ```
+   projection.stop(); projection = null
+   virtualDisplay.release(); imageReader.close() + surface.release()
+   projection = mpm.getMediaProjection(rc, Intent(data))  ← 拿到新 token
+   ```
+3. 然后 registerCallback + 再尝试 recreate。日志里能看到 `[RENEW-PROJ] SUCCESS / FAIL`
+
+---
+
+### 🔴 Bug 3 (华为智能分辨率)：screen 数据乱 1320x2848→2710x1320
+```
+02:50:15 [CAPTURE:create_ir] mode=MODE1 size=2848x1320 format=RGBX_8888(1) screen=1320x2848 portrait=true   ← OK
+02:50:17 [FRAME]   screen dims changed 1320x2848@540 → 2710x1320@540    ← 华为智能分辨率切换到 2710！而且 W>H
+         [CAPTURE:create_ir] size=2710x1320 portrait=false                     ← portrait=false MODE1 不交换 W/H
+         [CAPTURE:create_vd] size=2710x1320 density=540 flag=16               ← 横屏尺寸录竖屏游戏！ImageReader 方向错
+```
+**根因**：v2.1.9 captureScreenMetrics 混用 `getMetrics(W)` 和 `getRealMetrics(H)`，华为智能分辨率切换时两种 API 取到的屏幕尺寸源不是同一个（W=2710 from getMetrics, H=1320 from getRealMetrics → 变成 W>H），然后 portrait 判断 `H >= W` 返回 false，MODE1 不做 W↔H 交换，ImageReader 用横屏尺寸采集竖屏游戏 → 画面方向/比例错，NCNN 见不到 17 张竖牌 → 当然 detect=0。
+
+**v2.2.0 修：**
+1. captureScreenMetrics **统一只用 getRealMetrics 一次取 W/H/Density**（不混 getMetrics + getRealMetrics）
+2. 最后加防御性校验：如果 mScreenW > mScreenH（斗地主永远竖屏 H>W），**强制交换**，日志里会打印 `[SCREEN] getRealMetrics returned landscape W>H(...); auto-swapped back to portrait X×Y`
+3. portrait 从此只有一个来源：`mScreenHeight >= mScreenWidth`（已经强制竖屏，永远 true）
+
+---
+
+## ✅ v2.2.0 验证路径（30 秒够）
+装完后：
+1. 切到欢乐斗地主界面停留 30 秒
+2. **长按⚙️ → Tab2：调试日志** → 复制全部发回来
+
+正常日志（不再是之前的 1800 次死循环）应该是：
+- 只出现 **1 次** `[CAPTURE:recreate_pipeline]` 或 `[RENEW-PROJ]`（最多）
+- `[FRAME] OK bitmaps: raw=1320x2848@ARGB_8888 prepared=... detCnt=?? handCnt=??` 每 3 秒 1 次
+- 如果 `detCnt>20` 但 handCnt 还是=0：Tab1 切到欢乐斗地主（腾讯）→ detCnt 还是 20+ 的话那就是聚类阈值要调，下一个小版本秒改
+
+下载：jipaiqi-v2.2.0-fix-3bugs-debug.apk

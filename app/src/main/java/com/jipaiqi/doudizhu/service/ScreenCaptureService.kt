@@ -92,6 +92,15 @@ class ScreenCaptureService : Service() {
     @Volatile private var totalNulls:          Long = 0L
     @Volatile private var totalBitmapNulls:    Long = 0L
 
+    // ── v2.2.0 修复 3 个新 bug 专用变量 ────────────────────────────
+    // (B1) 重建限频：相同尺寸下最小间隔 2 秒，避免 SecurityException 后每 100ms 死循环
+    @Volatile private var lastRecreateAttemptMs: Long = 0L
+    // (B1) 连续重建失败计数，>= 3 次则判定投影 token 失效 → 需要重拿 projection
+    @Volatile private var consecutiveRecreateFails: Int = 0
+    // (B2) 保存 MediaProjection 授权结果，重拿 projection 用
+    @Volatile private var savedProjectionResultCode: Int = -1
+    @Volatile private var savedProjectionData: Intent? = null
+
     /** 斗地主固定为 MODE1 (wz.apk default) */
     enum class Mode { MODE1, MODE2, MODE3, MODE4 }
     private var currentMode: Mode = Mode.MODE1
@@ -139,6 +148,10 @@ class ScreenCaptureService : Service() {
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         val data: Intent = intent.getParcelableExtra(EXTRA_RESULT_DATA)
             ?: run { stopSelf(); return }
+        // (B2) v2.2.0 保存授权结果，重建失败（"don't re-use same projection" SecurityException）
+        //      时可以重拿 MediaProjection 实例而不用再次弹授权对话框
+        savedProjectionResultCode = resultCode
+        savedProjectionData = Intent(data)  // copy — 防止 Intent extras 在进程间被复用时的问题
         startForegroundWithNotification()
 
         val app = (application as JiPaiQiApp).core
@@ -197,13 +210,21 @@ class ScreenCaptureService : Service() {
 
             // ── REFRESH screen metrics every single tick (原版 FloatWindowInteractionCoordinator) ──
             captureScreenMetrics()
-            if (imageReader == null ||
-                mScreenWidth != lastSeenW || mScreenHeight != lastSeenH ||
-                mScreenDensity != lastSeenDpi) {
-                DLog.i(TAG, "[FRAME] screen dims changed ${lastSeenW}x${lastSeenH}@${lastSeenDpi} → " +
-                        "${mScreenWidth}x${mScreenHeight}@${mScreenDensity}; recreating pipeline")
-                lastSeenW = mScreenWidth; lastSeenH = mScreenHeight
-                lastSeenDpi = mScreenDensity
+            val dimsChanged = mScreenWidth != lastSeenW || mScreenHeight != lastSeenH ||
+                    mScreenDensity != lastSeenDpi
+            val noPipeline = imageReader == null
+            if (dimsChanged || noPipeline) {
+                if (dimsChanged) {
+                    DLog.i(TAG, "[FRAME] screen dims changed ${lastSeenW}x${lastSeenH}@${lastSeenDpi} → " +
+                            "${mScreenWidth}x${mScreenHeight}@${mScreenDensity}; recreating pipeline")
+                    lastSeenW = mScreenWidth; lastSeenH = mScreenHeight
+                    lastSeenDpi = mScreenDensity
+                } else {
+                    // imageReader==null 但是 dims 没变 — 属于 recreate 失败场景（B1/B2 逻辑已加 throttle）
+                    // 不打印误导性的 dims-changed 消息；只在每 ~15 秒打印一次状态汇总（通过 [STALL-CHECK]）
+                    maybeLogCaptureDebug("no_pipeline_keep_trying",
+                            "imageReader=null consecFails=$consecutiveRecreateFails")
+                }
                 recreateCapturePipelineIfSizeChanged()
             }
 
@@ -386,20 +407,20 @@ class ScreenCaptureService : Service() {
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, maxImages)
     }
 
-    private fun virtualDisplay() {
-        val p = projection ?: return
-        val r = imageReader ?: return
+    private fun virtualDisplay(): Boolean {
+        val p = projection ?: return false
+        val r = imageReader ?: return false
         val surface = runCatching { r.surface }.getOrNull()
         if (surface == null || !surface.isValid) {
             DLog.w(TAG, "[CAPTURE:vd_invalid] surface=$surface isValid=${surface?.isValid}")
-            return
+            return false
         }
-        if (virtualDisplay != null) return
+        if (virtualDisplay != null) return true
         val size = expectedCaptureSize()
         val d = mScreenDensity
         if (size[0] <= 0 || size[1] <= 0 || d <= 0) {
             DLog.w(TAG, "[CAPTURE:vd_invalid] size=${size.joinToString("x")} density=$d")
-            return
+            return false
         }
         // flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC)
         try {
@@ -408,16 +429,24 @@ class ScreenCaptureService : Service() {
                 "screen-mirror", size[0], size[1], d,
                 /* flags = */ 16, surface, null, null)
             lastVirtualDisplayDensity = d
+            return virtualDisplay != null
         } catch (t: Throwable) {
             DLog.e(TAG, "createVirtualDisplay failed", t)
+            return false
         }
     }
 
     // 原版 recreateCapturePipelineIfSizeChanged：多了 densityMismatch 和 surfaceInvalid
-    // 两个重建条件。原版 FloatWindowActions 第 140..155 行：
+    // 原版 FloatWindowActions 第 140..155 行：
     //     z = sizeMismatch || z2(densityMismatch) || z3(surfaceInvalid) || z4(missingDisplay)
+    // v2.2.0 新增：
+    //   (B1) 同尺寸重建最小间隔 RECREATE_MIN_INTERVAL_MS=2000ms，防 SecurityException 后 100ms 死循环
+    //   (B1) 连续 3 次重建失败 → 判定 MediaProjection token 已失效（对应 Android 14+ 的
+    //        "Don't re-use same projection instance" Exception）
+    //   (B2) 投影失效 → stop 旧 projection, 从 savedProjectionResultCode+data 重新 getMediaProjection
     private fun recreateCapturePipelineIfSizeChanged() {
-        if (projection == null) return
+        val p = projection
+        if (p == null) return
         val size = expectedCaptureSize()
         val r = imageReader
         val sizeMismatch = if (r != null) r.width != size[0] || r.height != size[1] else true
@@ -427,16 +456,91 @@ class ScreenCaptureService : Service() {
             val s = r.surface; s == null || !s.isValid
         }.getOrDefault(true)
         val missingDisplay = virtualDisplay == null
-        if (sizeMismatch || densityMismatch || surfaceInvalid || missingDisplay) {
-            DLog.i(TAG, "[CAPTURE:recreate_pipeline] sizeMismatch=$sizeMismatch " +
-                    "densityMismatch=$densityMismatch (prev=$lastVirtualDisplayDensity " +
-                    "now=$mScreenDensity) surfaceInvalid=$surfaceInvalid " +
-                    "missingVD=$missingDisplay expected=${size[0]}x${size[1]}")
-            runCatching { virtualDisplay?.release() }; virtualDisplay = null
-            lastVirtualDisplayDensity = -1
-            createImageReader(force = true)
-            if (mScreenWidth > 0 && mScreenHeight > 0 && mScreenDensity > 0) virtualDisplay()
+
+        val shouldRecreate = sizeMismatch || densityMismatch || surfaceInvalid || missingDisplay
+        if (!shouldRecreate) {
+            consecutiveRecreateFails = 0  // pipeline OK
+            return
         }
+        // (B1) 同尺寸 / 同错误场景下最小 2 秒间隔
+        val now = System.currentTimeMillis()
+        val sameSceneNotThrottled = sizeMismatch || densityMismatch || surfaceInvalid
+        val noThrottle = now - lastRecreateAttemptMs >= RECREATE_MIN_INTERVAL_MS
+        if (!noThrottle && sameSceneNotThrottled && !missingDisplay) {
+            // 在 throttle 窗口内、且不是因为 display 完全没了（缺 display 就应该立刻建）
+            // → 跳过。(missingDisplay=true 的话忽略 throttle 第一次创建还是要快)
+            // 例外：上一次是投影失效重拿 projection 的场景，同样允许立即重拿
+            return
+        }
+        lastRecreateAttemptMs = now
+        DLog.i(TAG, "[CAPTURE:recreate_pipeline] sizeMismatch=$sizeMismatch " +
+                "densityMismatch=$densityMismatch (prev=$lastVirtualDisplayDensity " +
+                "now=$mScreenDensity) surfaceInvalid=$surfaceInvalid " +
+                "missingVD=$missingDisplay expected=${size[0]}x${size[1]} " +
+                "consecFails=$consecutiveRecreateFails")
+
+        // (B2) 连续 3 次重建失败 → MediaProjection 的 Android 14 一次性 token 已失效
+        //      必须 stop 旧实例 + 用保存的 intent 重拿。
+        if (consecutiveRecreateFails >= 2) {
+            DLog.w(TAG, "[CAPTURE:recreate_pipeline] consecFails=$consecutiveRecreateFails>=3 → " +
+                    "renew MediaProjection via saved intent.")
+            renewMediaProjectionInstance()
+            if (projection == null) {
+                DLog.e(TAG, "[CAPTURE:recreate_pipeline] renew projection returned null; abort recreate.")
+                return
+            }
+        }
+
+        // 先 release 旧对象（顺序：VD → Surface/IR → projection 不要在此 release，只在 renew 时 release）
+        runCatching { virtualDisplay?.release() }; virtualDisplay = null
+        lastVirtualDisplayDensity = -1
+        val beforeW = r?.width ?: -1
+        val beforeH = r?.height ?: -1
+        createImageReader(force = true)
+        var ok = false
+        if (mScreenWidth > 0 && mScreenHeight > 0 && mScreenDensity > 0) {
+            ok = virtualDisplay()
+        }
+        if (!ok) {
+            consecutiveRecreateFails += 1
+            DLog.w(TAG, "[CAPTURE:recreate_pipeline] FAILED (count=$consecutiveRecreateFails) " +
+                    "ir=${beforeW}x${beforeH}→${imageReader?.width}x${imageReader?.height} " +
+                    "vdCreated=false")
+        } else {
+            consecutiveRecreateFails = 0
+        }
+    }
+
+    /**
+     * (B2) 旧 projection 触发 "Don't re-use same projection instance" 时，
+     * 用 startCapture 保存的 resultCode + intent 重新获取一个 MediaProjection 实例。
+     * 根据 Android 14 MediaProjectionManagerService 源码：每次 getMediaProjection()
+     * 会分配新的 Binder token，createVirtualDisplay 的 SecurityException 就会消失。
+     */
+    private fun renewMediaProjectionInstance() {
+        val rc = savedProjectionResultCode
+        val data = savedProjectionData
+        if (rc == -1 || data == null) {
+            DLog.e(TAG, "[RENEW-PROJ] missing saved resultCode/data, cannot renew.")
+            return
+        }
+        runCatching { projection?.stop() }
+        projection = null
+        runCatching { virtualDisplay?.release() }; virtualDisplay = null
+        lastVirtualDisplayDensity = -1
+        runCatching { imageReader?.close(); imageReader?.surface?.release() }; imageReader = null
+        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val newData = Intent(data)  // defensive copy again
+        projection = runCatching { mpm.getMediaProjection(rc, newData) }.getOrNull()
+        if (projection == null) {
+            DLog.e(TAG, "[RENEW-PROJ] getMediaProjection returned null (user likely revoked?); " +
+                    "will request fresh grant next time activity resumes.")
+            return
+        }
+        projection!!.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() { stopCapture(); stopSelf() }
+        }, captureHandler)
+        DLog.i(TAG, "[RENEW-PROJ] SUCCESS: new MediaProjection obtained for resultCode=$rc.")
     }
 
     // wz.apk FloatWindowActions.expectedCaptureSize lines 158..166.
@@ -549,29 +653,40 @@ class ScreenCaptureService : Service() {
         return out
     }
 
-    // captureAndStoreScreenMetrics — getMetrics for width, getRealMetrics for height
+    // captureAndStoreScreenMetrics — v2.2.0 统一只用 getRealMetrics 避免华为切智能分辨率时
+    //                                   getMetrics W != getRealMetrics H（2710 vs 1320 的 bug 根因）
+    // 原版 wz.apk FloatWindowLayoutHelper.captureAndStoreScreenMetrics 里本来就是
+    //   getRealMetrics → w/h，只在 Activity.attachBaseContext 不同时用 getMetrics 兜底。
     private fun captureScreenMetrics() {
         val wm = applicationContext.getSystemService(Context.WINDOW_SERVICE)
                 as? android.view.WindowManager
-        if (wm == null) {
-            val dm = resources.displayMetrics
-            mScreenWidth = dm.widthPixels
-            mScreenHeight = dm.heightPixels
-            mScreenDensity = dm.densityDpi
-            return
+        val fallbackDm = resources.displayMetrics
+        val real = DisplayMetrics()
+        val gotReal = if (wm != null) {
+            runCatching {
+                val cls = Class.forName("android.view.Display")
+                cls.getMethod("getRealMetrics", DisplayMetrics::class.java)
+                    .invoke(wm.defaultDisplay, real)
+            }.isSuccess
+        } else false
+        if (gotReal && real.widthPixels > 0 && real.heightPixels > 0) {
+            // (B3) getRealMetrics 一次给出真实 W/H + density，
+            //      portrait = height > width（与 orientation 传感器无关，只用尺寸）
+            mScreenWidth  = real.widthPixels
+            mScreenHeight = real.heightPixels
+            mScreenDensity = real.densityDpi
+        } else {
+            mScreenWidth  = fallbackDm.widthPixels
+            mScreenHeight = fallbackDm.heightPixels
+            mScreenDensity = fallbackDm.densityDpi
         }
-        val dm = DisplayMetrics()
-        runCatching { wm.defaultDisplay.getMetrics(dm) }
-        mScreenWidth = dm.widthPixels
-        mScreenDensity = dm.densityDpi
-        mScreenHeight = try {
-            val real = DisplayMetrics()
-            val cls = Class.forName("android.view.Display")
-            cls.getMethod("getRealMetrics", DisplayMetrics::class.java)
-                .invoke(wm.defaultDisplay, real)
-            real.heightPixels
-        } catch (_: Throwable) {
-            dm.heightPixels
+        if (mScreenWidth > mScreenHeight) {
+            // (B3) 强校验：斗地主始终是竖屏，一旦 getRealMetrics 给了横屏值，说明
+            // Display API 在某些机型上受窗口 manager 影响 — 直接交换。
+            // 你在用户截图里永远是竖牌 17 张排一行，所以 H 必须 > W。
+            val t = mScreenWidth; mScreenWidth = mScreenHeight; mScreenHeight = t
+            DLog.w(TAG, "[SCREEN] getRealMetrics returned landscape W>H(${mScreenHeight}x${mScreenWidth}); " +
+                    "auto-swapped back to portrait ${mScreenWidth}x${mScreenHeight}")
         }
     }
 
@@ -611,6 +726,7 @@ class ScreenCaptureService : Service() {
         private const val TAG = "ScreenCaptureService"
         private const val CHANNEL_ID = "jiPaiQi_capture"
         private const val NOTIF_ID = 0x7713
+        private const val RECREATE_MIN_INTERVAL_MS = 2000L  // v2.2.0 B1 throttle
 
         // Companion-level snapshot mirrors so the floating window (a totally
         // separate Service) can reach the last-frame diagnostics without a
