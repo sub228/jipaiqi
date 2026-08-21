@@ -104,7 +104,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun onFrame(reader: ImageReader) {
-        if (processing) { // drop overlapping frames; OCR is the bottleneck
+        if (processing) { // drop overlapping frames; YOLO (~60ms) is the bottleneck
             runCatching { reader.acquireLatestImage()?.close() }
             return
         }
@@ -115,18 +115,35 @@ class ScreenCaptureService : Service() {
                 val bitmap = imageToBitmap(image)
                 if (bitmap != null) {
                     val core = (application as JiPaiQiApp).core
-                    val pipeline = core.pipeline ?: return@launch
-                    val result = pipeline.processFrame(bitmap)
-                    if (result.stateChanged) core.notifyStateChanged()
+                    val changed = run {
+                        val np = core.nativePipeline
+                        if (np != null) {
+                            val r = np.processFrame(bitmap)
+                            // record telemetry so the status dots light up correctly
+                            lastFrameHandCount = r.hand.size
+                            lastFrameDetections = r.totalDetections
+                            r.stateChanged
+                        } else {
+                            val r = core.pipeline?.processFrame(bitmap)
+                            lastFrameHandCount = r?.hand?.size ?: 0
+                            lastFrameDetections = r?.hand?.size ?: 0
+                            r?.stateChanged ?: false
+                        }
+                    }
+                    if (changed) core.notifyStateChanged()
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "frame process error: ${e.message}")
+                Log.w(TAG, "frame process error: ${e.message}", e)
             } finally {
                 runCatching { image.close() }
                 processing = false
             }
         }
     }
+
+    // Live stats for the status-dot UI.
+    @Volatile var lastFrameHandCount: Int = 0
+    @Volatile var lastFrameDetections: Int = 0
 
     /** Convert an RGBA_8888 [Image] to a Bitmap without extra copies. */
     private fun imageToBitmap(image: Image): Bitmap? {

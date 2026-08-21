@@ -121,14 +121,18 @@ class MainActivity : AppCompatActivity() {
             // Run heavy load off the main thread.
             val hasDou = runCatching { core.douZero?.let { e ->
                 Position.values().count { e.hasModel(it) } } ?: 0 }.getOrDefault(0)
-            val hasYolo = core.yolo != null
+            // PREFERENCE: original-native-YOLO ✓ > custom-ONNX-YOLO ✓ > none
+            val yoloBadge = when {
+                core.nativeYoloReady -> "✓(原版NCNN)"
+                core.yolo != null   -> "✓(ONNX)"
+                else                -> "✗"
+            }
             val txt = buildString {
-                append("模型：DouZero ${hasDou}/3  ·  YOLO ")
-                append(if (hasYolo) "✓" else "✗")
-                if (!hasYolo && hasDou == 0) append("  (纯 OCR 模式)")
+                append("模型：DouZero ${hasDou}/3  ·  YOLO ").append(yoloBadge)
+                if (!core.nativeYoloReady && core.yolo == null) append("  (纯 OCR 模式)")
             }
             b.modelStatus.text = txt
-            if (hasDou == 0 && !hasYolo) {
+            if (hasDou == 0 && !core.nativeYoloReady && core.yolo == null) {
                 Toast.makeText(this@MainActivity,
                     getString(R.string.no_models_msg), Toast.LENGTH_LONG).show()
             }

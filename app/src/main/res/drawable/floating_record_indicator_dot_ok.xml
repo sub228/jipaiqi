@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Green "OK" state of the recording status indicator dot. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <size android:width="6dp" android:height="6dp" />
+    <solid android:color="@color/good" />
+</shape>

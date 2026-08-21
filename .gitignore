@@ -3,6 +3,10 @@
 *.aab
 *.ap_
 *.dex
+# NOTE: APK binaries are published via GitHub Releases only
+# (see https://github.com/sub228/jipaiqi/releases).  They are NEVER
+# committed to git because the latest arm64+v7a build is ~190 MB which
+# exceeds GitHub's 100 MB hard per-blob limit.
 
 # Build dirs
 /build/
@@ -19,12 +23,20 @@
 # Native build artifacts
 *.so.bak
 
-# Models: large binary weights are not committed.
-# Run `tools/convert_douzero_to_onnx.py` and `tools/convert_yolo_to_onnx.py` to regenerate them.
-/app/src/main/assets/models/*.onnx
-/app/src/main/assets/models/*.tflite
-/app/src/main/assets/models/*.pt
-/app/src/main/assets/models/*.ckpt
+# Reverse engineering workspace (jadx, downloaded original APKs, etc.)
+# These are huge helper blobs used only during porting and must never be
+# pushed (jadx.zip alone is 101 MB, wz.apk 244 MB).
+/apk_dl/
+
+# Root-level model artefacts produced by the conversion pipeline
+# (live copies live under app/src/main/assets/models/ and are already
+# tracked on origin/main).
+/landlord*.onnx
+/landlord*.pt
+/landlord*.ckpt
+/landlord*.tflite
+
+# Models: regenerate with tools/convert_* scripts
 /tools/_downloads/
 /tools/_output/
 

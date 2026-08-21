@@ -16,10 +16,13 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // The app ships native libs only for arm64 (modern Android phones) and x86_64 (emulator).
-        // Keeps APK size reasonable. The YOLO + DouZero ONNX models target arm64 primarily.
+        // Ship native libs for the ABIs where the ORIGINAL prebuilt
+        // `libyolov8ncnn.so` actually exists: arm64-v8a + armeabi-v7a.
+        // x86_64 emulator builds don't have a NCNN YOLO native library
+        // from the original APK, so exclude x86_64 to avoid UnsatisfiedLinkError
+        // at runtime (the detector would fall back to pure OCR anyway).
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
     }
 

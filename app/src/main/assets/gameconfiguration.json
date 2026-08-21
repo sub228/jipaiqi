@@ -1,0 +1,82 @@
+[
+  {
+  "key": "doudizhu_3",
+  "hand_card_nums": 17,
+  "name": "3人斗地主",
+  "bottom_cards_number": 3,
+  "type": "doudizhu",
+  "player_number": 3,
+  "deck_count": 1,
+  "total_cards": 54,
+  "cards_total_count":[
+    {"X": 1},
+    {"D": 1},
+    {"2": 4},
+    {"A": 4},
+    {"K": 4},
+    {"Q": 4},
+    {"J": 4},
+    {"10": 4},
+    {"9": 4},
+    {"8": 4},
+    {"7": 4},
+    {"6": 4},
+    {"5": 4},
+    {"4": 4},
+    {"3": 4}
+    ]
+  },
+  {
+    "key": "doudizhu_3",
+    "hand_card_nums": 16,
+    "name": "3人斗地主",
+    "bottom_cards_number": 3,
+    "type": "doudizhu",
+    "player_number": 3,
+    "deck_count": 1,
+    "total_cards": 54,
+    "cards_total_count":[
+      {"X": 1},
+      {"D": 1},
+      {"2": 4},
+      {"A": 4},
+      {"K": 4},
+      {"Q": 4},
+      {"J": 4},
+      {"10": 4},
+      {"9": 4},
+      {"8": 4},
+      {"7": 4},
+      {"6": 4},
+      {"5": 4},
+      {"4": 4},
+      {"3": 4}
+    ]
+  }, {
+  "key": "doudizhu_4",
+  "hand_card_nums": 25,
+  "name": "4人斗地主",
+  "bottom_cards_number": 4,
+  "type": "doudizhu",
+  "player_number": 3,
+  "deck_count": 1,
+  "total_cards": 54,
+  "cards_total_count":[
+    {"X": 1},
+    {"D": 1},
+    {"2": 4},
+    {"A": 4},
+    {"K": 4},
+    {"Q": 4},
+    {"J": 4},
+    {"10": 4},
+    {"9": 4},
+    {"8": 4},
+    {"7": 4},
+    {"6": 4},
+    {"5": 4},
+    {"4": 4},
+    {"3": 4}
+  ]
+}
+]

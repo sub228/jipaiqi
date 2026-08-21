@@ -95,7 +95,8 @@ object MoveDetector {
         if (n == 8 && ((counts.size == 3 || counts.size == 2) &&
                     (byCount[4] == 1 && byCount[2] == 2) || byCount[4] == 2)
         ) {
-            val rank = counts.entries.first { it.value == 4 }.key
+            // DouZero: rank = max of the 4-count cards.
+            val rank = counts.filter { it.value == 4 }.keys.maxOrNull() ?: 0
             return MoveInfo(MoveType.BOMB_WITH_TWO_PAIRS, rank)
         }
 
@@ -120,6 +121,18 @@ object MoveDetector {
                     if (serial3.size == pair.size && counts.size == serial3.size * 2) {
                         return MoveInfo(MoveType.SERIAL_3_2, serial3[0], serial3.size)
                     }
+                }
+            }
+            // DouZero edge case: exactly 4 triples where one is a "carrier"
+            // providing 3 singles → still a SERIAL_3_1 of length 3.
+            if (serial3.size == 4) {
+                val tail = serial3.subList(1, 4)
+                val head = serial3.subList(0, 3)
+                if (isContinuousSeq(tail)) {
+                    return MoveInfo(MoveType.SERIAL_3_1, tail[0], 3)
+                }
+                if (isContinuousSeq(head)) {
+                    return MoveInfo(MoveType.SERIAL_3_1, head[0], 3)
                 }
             }
         }

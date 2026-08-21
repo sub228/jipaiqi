@@ -3,6 +3,14 @@
     <color name="brand_primary">#E53935</color>
     <color name="brand_primary_dark">#B71C1C</color>
     <color name="brand_accent">#FFC107</color>
+    <!-- Gold "AI建议" label color, matches the original app's color_febf20. -->
+    <color name="gold_label">#FFFEBF20</color>
+    <color name="white_80">#80FFFFFF</color>
+    <color name="white_50">#33FFFFFF</color>
+    <color name="overlay_dark">#88000000</color>
+    <color name="overlay_dark_strong">#AF000000</color>
+    <color name="overlay_dark_btn">#AA000000</color>
+    <color name="pill_light">#FFF7F7F7</color>
     <color name="bg_dark">#1A1A1A</color>
     <color name="bg_panel">#CC111111</color>
     <color name="text_primary">#FFFFFF</color>

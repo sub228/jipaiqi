@@ -84,9 +84,9 @@ class GameState {
     fun setMyPosition(p: Position) = lock.withLock { myPosition = p }
     fun setBottomCards(cards: List<Int>) = lock.withLock { bottomCards = cards.sorted() }
 
-    /** Replace my hand with [cards] (deduplicated, sorted). */
+    /** Replace my hand with [cards] (sorted, preserving duplicate ranks). */
     fun setMyHand(cards: List<Int>) = lock.withLock {
-        myHand = cards.distinct().sorted()
+        myHand = cards.sorted()
     }
 
     /**
@@ -99,7 +99,7 @@ class GameState {
      */
     fun recordPlay(position: Position, cards: List<Int>): Boolean = lock.withLock {
         if (cards.isEmpty()) return false
-        val sorted = cards.distinct().sorted()
+        val sorted = cards.sorted()
 
         // Dedup: same position plays the same cards twice.
         val sig = "${position}:${sorted.joinToString(",")}"
@@ -127,6 +127,18 @@ class GameState {
         // "lead" I must beat, the play on the table stays.
     }
 
+    /**
+     * Clear the "play on the table". Called by the recognizer when the
+     * table region has been empty for several consecutive frames, which
+     * signals that everyone passed and the next player leads (rival_move
+     * becomes empty, so any move is legal again). Mirrors DouZero's
+     * `get_last_move` returning [] after two consecutive passes.
+     */
+    fun clearTable() = lock.withLock {
+        lastMoveOnTable = emptyList()
+        lastSeenPlaySignature = null
+    }
+
     /** Reset state for a new game. */
     fun newGame() = lock.withLock {
         playedByPosition.values.forEach { it.clear() }
@@ -150,13 +162,19 @@ class GameState {
      * I'm a farmer).
      */
     fun otherHandCards(): List<Int> = lock.withLock {
-        val mine = myHand.toSet()
-        val played = playedByPosition.values.flatten().toSet()
+        // NOTE: do NOT collapse to Set — duplicate ranks must be counted
+        // (a hand can legitimately hold 4 copies of a rank).
+        val mineCounts = HashMap<Int, Int>()
+        for (c in myHand) mineCounts[c] = (mineCounts[c] ?: 0) + 1
+        val playedCounts = HashMap<Int, Int>()
+        for (c in playedByPosition.values.flatten()) {
+            playedCounts[c] = (playedCounts[c] ?: 0) + 1
+        }
         val out = ArrayList<Int>()
         for (rank in Card.ALL_RANKS) {
             val total = Card.TOTAL[rank]!!
-            val inMine = mine.count { it == rank }
-            val inPlayed = played.count { it == rank }
+            val inMine = mineCounts[rank] ?: 0
+            val inPlayed = playedCounts[rank] ?: 0
             val remaining = total - inMine - inPlayed
             repeat(remaining.coerceAtLeast(0)) { out.add(rank) }
         }

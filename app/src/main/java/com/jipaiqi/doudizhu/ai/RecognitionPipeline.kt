@@ -44,6 +44,7 @@ class RecognitionPipeline(
     }
 
     private var lastTableSig: String? = null
+    private var emptyTableFrames: Int = 0
 
     suspend fun processFrame(frame: Bitmap): FrameResult {
         val h = frame.height
@@ -75,7 +76,9 @@ class RecognitionPipeline(
         }
 
         var playRecorded = false
+        var tableCleared = false
         if (table.isNotEmpty()) {
+            emptyTableFrames = 0
             val sig = table.sorted().joinToString(",")
             if (sig != lastTableSig) {
                 // Heuristic: assign the play to the "other" player relative
@@ -87,8 +90,17 @@ class RecognitionPipeline(
                 if (state.recordPlay(player, table)) playRecorded = true
                 lastTableSig = sig
             }
+        } else {
+            // Table empty: after a few consecutive empty frames, treat it as
+            // "everyone passed / new lead" and clear the play-to-beat.
+            emptyTableFrames++
+            if (emptyTableFrames >= EMPTY_TABLE_CLEAR_FRAMES && state.lastMove().isNotEmpty()) {
+                state.clearTable()
+                lastTableSig = null
+                tableCleared = true
+            }
         }
-        return FrameResult(hand.sorted(), table.sorted(), playRecorded || handChanged)
+        return FrameResult(hand.sorted(), table.sorted(), playRecorded || handChanged || tableCleared)
     }
 
     private suspend fun yoloDetect(frame: Bitmap): List<CardOcr.RecognizedCard> {
@@ -125,6 +137,7 @@ class RecognitionPipeline(
 
     fun reset() {
         lastTableSig = null
+        emptyTableFrames = 0
     }
 
     data class FrameResult(
@@ -133,5 +146,9 @@ class RecognitionPipeline(
         val stateChanged: Boolean,
     )
 
-    companion object { private const val TAG = "RecognitionPipeline" }
+    companion object {
+        private const val TAG = "RecognitionPipeline"
+        /** Consecutive empty-table frames before clearing the play-to-beat. */
+        private const val EMPTY_TABLE_CLEAR_FRAMES = 4
+    }
 }

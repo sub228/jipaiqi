@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Circular manual reset button (matches original shape_manual_reset_circle). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <size android:width="@dimen/dp_45" android:height="@dimen/dp_45" />
+    <solid android:color="@color/overlay_dark_btn" />
+    <stroke android:width="@dimen/dp_1" android:color="@color/white_50" />
+</shape>

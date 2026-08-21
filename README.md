@@ -111,6 +111,43 @@ gradle assembleRelease -Pandroid.injected.signing.store.file=jipaiqi.keystore \
 
 The release APK is at `app/build/outputs/apk/release/app-release.apk`.
 
+### Run the JVM unit tests
+
+Pure-logic components (`Card`, `MoveDetector`, `MoveSelector`,
+`MoveGenerator`, `GameState`, `FeatureEncoder`) are covered by JVM
+tests that don't need a device or an emulator:
+
+```bash
+gradle testDebugUnitTest
+```
+
+The test report is written to
+`app/build/reports/tests/testDebugUnitTest/index.html`. The tests
+verify:
+
+- `Card.cardsToArray` matches DouZero `_cards2array` (column-major
+  4×13 + 2 joker bits).
+- `MoveDetector.getMoveType` classifies every one of the 14 DouZero
+  move types (single, pair, triple, bomb, king bomb, triple-with-one,
+  triple-with-pair, serial single/pair/triple, serial 3+1/3+2, bomb
+  with two / two-pairs) and the BOMB_WITH_TWO_PAIRS edge case where
+  the rank is `max` of the 4-count cards.
+- `MoveSelector.beats` follows standard Dou Dizhu rules (same type +
+  length + strictly higher rank; bomb beats non-bomb; king bomb
+  beats bomb).
+- `MoveGenerator.legalActions` returns every legal move when leading
+  (no `pass` allowed) and only beating moves + `pass` when following,
+  correctly allowing bombs/king bombs to overtake any non-bomb rival.
+- `GameState` deduplication, impossibility rejection, `clearTable()`
+  after consecutive empty frames, `newGame()` reset, `otherHandCards`
+  correctly counting duplicates (a hand can legitimately hold 4 of a
+  rank — must not collapse to a `Set`).
+- `FeatureEncoder` produces the exact tensor shapes expected by
+  DouZero: `(N, 5, 162)` for `z_batch` and `(N, 373)` for landlord /
+  `(N, 484)` for farmers for `x_batch`, with the `x_no_action`
+  prefix shared across all `N` actions and the trailing 54 floats
+  matching `Card.cardsToArray(action)`.
+
 ---
 
 ## 3. Using the app

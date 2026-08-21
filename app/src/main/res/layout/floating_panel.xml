@@ -1,113 +1,492 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Floating window content. Displayed inside the WindowManager view.
-    Layout is intentionally compact: a 3-row grid (3..K, A/2, Jokers) plus
-    a small "AI 推荐" line that shows the DouZero-suggested play.
+    Floating window content. Faithfully replicates the original 记牌器
+    app's res/layout/floating_layout.xml:
+
+      1. popWindow    — collapsed "显示浮窗" hint (eye icon + label)
+      2. showset      — horizontal row of function pills:
+                        AI建议 / 出牌历史 / 重置辅助 / 防作弊 / 缩小 / 退出
+      3. main bar     — dark rounded logmodels (settings + 3 status dots +
+                        nostart text OR rank grid + history) + manual reset
+                        circle + AI建议 overlay (3 output lines)
+
+    The rank grid (numList) is a horizontal LinearLayout inflated with 15
+    floating_cell entries (one per rank: 3..2, BJ, RJ) at runtime.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/ll_ppop_window"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:orientation="vertical"
-    android:background="@drawable/floating_bg"
-    android:padding="8dp">
+    android:orientation="vertical">
 
+    <!-- 1. Collapsed "显示浮窗" hint. Shown only when the panel is shrunk. -->
     <LinearLayout
-        android:id="@+id/headerRow"
+        android:id="@+id/pop_window"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="@drawable/shape_af000000_5"
+        android:visibility="gone">
 
-        <TextView
-            android:id="@+id/titleText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="记牌器"
-            android:textColor="@color/brand_accent"
-            android:textSize="11sp"
-            android:textStyle="bold"
+        <ImageView
+            android:layout_width="@dimen/dp_18"
+            android:layout_height="@dimen/dp_14"
+            android:layout_marginTop="@dimen/dp_10"
+            android:scaleType="fitXY"
+            android:src="@drawable/ic_yanjing"
+            android:contentDescription="显示浮窗"
             tools:ignore="HardcodedText" />
 
         <TextView
-            android:id="@+id/roleText"
+            android:id="@+id/tv_xuanfu"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="6dp"
-            android:text="— 地主"
+            android:layout_marginTop="@dimen/dp_5"
+            android:layout_marginBottom="@dimen/dp_10"
+            android:text="显示浮窗"
             android:textColor="@color/text_primary"
-            android:textSize="11sp"
+            android:textSize="@dimen/sp_10"
             tools:ignore="HardcodedText" />
+    </LinearLayout>
 
-        <View
-            android:layout_width="0dp"
-            android:layout_height="0dp"
-            android:layout_weight="1" />
+    <!-- 2. Function buttons row. Hidden until the settings gear is tapped. -->
+    <LinearLayout
+        android:id="@+id/showset"
+        android:layout_width="wrap_content"
+        android:layout_height="@dimen/dp_25"
+        android:layout_marginBottom="@dimen/dp_5"
+        android:layout_gravity="center_vertical"
+        android:gravity="center_vertical"
+        android:background="@drawable/shape_af000000_10"
+        android:paddingEnd="@dimen/dp_5"
+        android:visibility="gone">
 
-        <TextView
-            android:id="@+id/closeBtn"
+        <!-- AI建议 -->
+        <LinearLayout
+            android:id="@+id/ll_head_6"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="2dp"
-            android:text="✕"
-            android:textColor="@color/text_secondary"
-            android:textSize="13sp"
-            tools:ignore="HardcodedText" />
+            android:layout_height="@dimen/dp_20"
+            android:layout_marginStart="@dimen/dp_5"
+            android:layout_gravity="center_vertical"
+            android:gravity="center_vertical"
+            android:background="@drawable/shape_f7f7f7_5"
+            android:visibility="visible">
+
+            <ImageView
+                android:id="@+id/iv_head_6"
+                android:layout_width="@dimen/dp_14"
+                android:layout_height="@dimen/dp_14"
+                android:layout_marginStart="@dimen/dp_10"
+                android:src="@drawable/ic_select"
+                tools:ignore="ContentDescription" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/dp_5"
+                android:layout_marginEnd="@dimen/dp_10"
+                android:text="AI建议"
+                android:textColor="@color/card_black"
+                android:textSize="@dimen/sp_10"
+                tools:ignore="HardcodedText" />
+        </LinearLayout>
+
+        <!-- 出牌历史 -->
+        <LinearLayout
+            android:id="@+id/ll_head_1"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/dp_20"
+            android:layout_marginStart="@dimen/dp_5"
+            android:layout_gravity="center_vertical"
+            android:gravity="center_vertical"
+            android:background="@drawable/shape_f7f7f7_5">
+
+            <ImageView
+                android:id="@+id/iv_head_1"
+                android:layout_width="@dimen/dp_14"
+                android:layout_height="@dimen/dp_14"
+                android:layout_marginStart="@dimen/dp_10"
+                android:src="@drawable/ic_select"
+                tools:ignore="ContentDescription" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/dp_5"
+                android:layout_marginEnd="@dimen/dp_10"
+                android:text="出牌历史"
+                android:textColor="@color/card_black"
+                android:textSize="@dimen/sp_10"
+                tools:ignore="HardcodedText" />
+        </LinearLayout>
+
+        <!-- 重置辅助 -->
+        <LinearLayout
+            android:id="@+id/ll_head_5"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/dp_20"
+            android:layout_marginStart="@dimen/dp_5"
+            android:layout_gravity="center_vertical"
+            android:gravity="center_vertical"
+            android:background="@drawable/shape_f7f7f7_5">
+
+            <ImageView
+                android:id="@+id/iv_head_5"
+                android:layout_width="@dimen/dp_14"
+                android:layout_height="@dimen/dp_14"
+                android:layout_marginStart="@dimen/dp_10"
+                android:src="@drawable/ic_select"
+                tools:ignore="ContentDescription" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/dp_5"
+                android:layout_marginEnd="@dimen/dp_10"
+                android:text="重置辅助"
+                android:textColor="@color/card_black"
+                android:textSize="@dimen/sp_10"
+                tools:ignore="HardcodedText" />
+        </LinearLayout>
+
+        <!-- 防作弊 -->
+        <LinearLayout
+            android:id="@+id/ll_head_8"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/dp_20"
+            android:layout_marginStart="@dimen/dp_5"
+            android:layout_gravity="center_vertical"
+            android:gravity="center_vertical"
+            android:background="@drawable/shape_f7f7f7_5"
+            android:visibility="visible">
+
+            <ImageView
+                android:id="@+id/iv_head_8"
+                android:layout_width="@dimen/dp_14"
+                android:layout_height="@dimen/dp_14"
+                android:layout_marginStart="@dimen/dp_10"
+                android:src="@drawable/ic_select"
+                tools:ignore="ContentDescription" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/dp_5"
+                android:layout_marginEnd="@dimen/dp_10"
+                android:text="防作弊"
+                android:textColor="@color/card_black"
+                android:textSize="@dimen/sp_10"
+                tools:ignore="HardcodedText" />
+        </LinearLayout>
+
+        <!-- 缩小 -->
+        <LinearLayout
+            android:id="@+id/ll_head_4"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/dp_20"
+            android:layout_marginStart="@dimen/dp_5"
+            android:layout_gravity="center_vertical"
+            android:gravity="center_vertical"
+            android:background="@drawable/shape_f7f7f7_5"
+            android:visibility="visible">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/dp_5"
+                android:layout_marginEnd="@dimen/dp_5"
+                android:text="缩小"
+                android:textColor="@color/card_black"
+                android:textSize="@dimen/sp_10"
+                tools:ignore="HardcodedText" />
+        </LinearLayout>
+
+        <!-- 退出 -->
+        <LinearLayout
+            android:id="@+id/ll_head_7"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/dp_20"
+            android:layout_marginStart="@dimen/dp_5"
+            android:layout_gravity="center_vertical"
+            android:gravity="center_vertical"
+            android:background="@drawable/shape_f7f7f7_5"
+            android:visibility="visible">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/dp_5"
+                android:layout_marginEnd="@dimen/dp_5"
+                android:text="退出"
+                android:textColor="@color/card_black"
+                android:textSize="@dimen/sp_10"
+                tools:ignore="HardcodedText" />
+        </LinearLayout>
     </LinearLayout>
 
+    <!-- 3. Main horizontal bar. -->
     <LinearLayout
-        android:id="@+id/rankRow1"
+        android:id="@+id/main_bar"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:layout_marginTop="2dp">
-
-        <include layout="@layout/floating_cell" android:id="@+id/cell_3" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_4" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_5" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_6" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_7" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_8" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_9" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rankRow2"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_height="@dimen/dp_45"
         android:orientation="horizontal">
 
-        <include layout="@layout/floating_cell" android:id="@+id/cell_10" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_J" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_Q" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_K" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_A" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_2" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_BJ" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_RJ" />
+        <!-- Optional cropped-frame preview. Hidden by default. -->
+        <ImageView
+            android:id="@+id/iv_crop_preview"
+            android:layout_width="@dimen/dp_90"
+            android:layout_height="match_parent"
+            android:layout_marginStart="@dimen/dp_5"
+            android:layout_marginEnd="@dimen/dp_5"
+            android:adjustViewBounds="true"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            android:contentDescription="crop preview"
+            tools:ignore="HardcodedText" />
+
+        <!-- Main dark rounded counter container. -->
+        <LinearLayout
+            android:id="@+id/logmodels"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/dp_45"
+            android:orientation="horizontal"
+            android:background="@drawable/shape_af000000_10">
+
+            <!-- Left column: settings gear + record status dots. -->
+            <LinearLayout
+                android:layout_width="@dimen/dp_30"
+                android:layout_height="match_parent"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:id="@+id/setting"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:layout_marginTop="@dimen/dp_5"
+                    android:layout_marginBottom="@dimen/dp_2"
+                    android:gravity="center">
+
+                    <ImageView
+                        android:padding="@dimen/dp_5"
+                        android:layout_width="@dimen/dp_22"
+                        android:layout_height="@dimen/dp_22"
+                        android:src="@drawable/ic_shezhi"
+                        tools:ignore="ContentDescription" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/record"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:layout_marginTop="@dimen/dp_2"
+                    android:layout_marginBottom="@dimen/dp_5"
+                    android:orientation="vertical"
+                    android:gravity="center">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="@dimen/dp_22"
+                        android:orientation="horizontal"
+                        android:gravity="center">
+
+                        <View
+                            android:id="@+id/record_auth_indicator"
+                            android:layout_width="@dimen/dp_5"
+                            android:layout_height="@dimen/dp_5"
+                            android:background="@drawable/floating_record_indicator_dot" />
+
+                        <View
+                            android:id="@+id/record_frame_indicator"
+                            android:layout_width="@dimen/dp_5"
+                            android:layout_height="@dimen/dp_5"
+                            android:layout_marginStart="@dimen/dp_3"
+                            android:background="@drawable/floating_record_indicator_dot" />
+
+                        <View
+                            android:id="@+id/record_analyze_indicator"
+                            android:layout_width="@dimen/dp_5"
+                            android:layout_height="@dimen/dp_5"
+                            android:layout_marginStart="@dimen/dp_3"
+                            android:background="@drawable/floating_record_indicator_dot" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/record_status_text"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/dp_1"
+                        android:text="异常"
+                        android:textColor="#FFFFB3B3"
+                        android:textSize="@dimen/sp_8"
+                        android:visibility="gone"
+                        tools:ignore="HardcodedText" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- "等待牌局正式开始" placeholder, shown until a hand is recognized. -->
+            <LinearLayout
+                android:id="@+id/nostart"
+                android:layout_width="@dimen/dp_280"
+                android:layout_height="@dimen/dp_45"
+                android:layout_gravity="center_vertical"
+                android:gravity="start|center"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/nostart_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:gravity="center_vertical"
+                    android:text="等待牌局正式开始"
+                    android:textColor="@color/text_primary"
+                    android:textSize="@dimen/sp_12"
+                    tools:ignore="HardcodedText" />
+            </LinearLayout>
+
+            <!-- Rank grid. Hidden until the first frame is processed. -->
+            <LinearLayout
+                android:id="@+id/ll_num_list"
+                android:layout_width="wrap_content"
+                android:layout_height="@dimen/dp_45"
+                android:layout_marginTop="@dimen/dp_5"
+                android:layout_marginBottom="@dimen/dp_5"
+                android:layout_gravity="center_vertical"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <View
+                    android:id="@+id/line"
+                    android:layout_width="@dimen/dp_1"
+                    android:layout_height="@dimen/dp_45"
+                    android:background="@color/white_80"
+                    android:visibility="gone" />
+
+                <!-- 15 rank cells are inflated here at runtime. -->
+                <LinearLayout
+                    android:id="@+id/num_list"
+                    android:layout_width="wrap_content"
+                    android:layout_height="@dimen/dp_45"
+                    android:orientation="horizontal" />
+            </LinearLayout>
+
+            <!-- Play history list. Hidden until "出牌历史" is toggled on. -->
+            <LinearLayout
+                android:id="@+id/show_log_list"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:minWidth="@dimen/dp_180"
+                android:orientation="vertical"
+                android:layout_gravity="center_vertical"
+                android:gravity="center_vertical"
+                android:background="@drawable/shape_af000000_10"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/history_cards"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Manual reset circle. Hidden until "重置辅助" is toggled on. -->
+        <FrameLayout
+            android:id="@+id/manual_reset_btn"
+            android:layout_width="@dimen/dp_45"
+            android:layout_height="@dimen/dp_45"
+            android:layout_marginStart="@dimen/dp_5"
+            android:background="@drawable/shape_manual_reset_circle"
+            android:contentDescription="手动重置"
+            android:visibility="gone"
+            tools:ignore="HardcodedText">
+
+            <TextView
+                android:id="@+id/manual_reset_btn_text"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:text="重置"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/sp_10"
+                android:textStyle="bold"
+                tools:ignore="HardcodedText" />
+        </FrameLayout>
+
+        <!-- AI建议 overlay. Hidden until "AI建议" is toggled on. -->
+        <LinearLayout
+            android:id="@+id/ai_message"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="@dimen/dp_90"
+            android:layout_marginStart="@dimen/dp_5"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <RelativeLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_gravity="bottom"
+                android:background="@drawable/shape_af000000_10">
+
+                <TextView
+                    android:id="@+id/testc"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_alignParentTop="true"
+                    android:layout_alignParentEnd="true"
+                    android:layout_marginEnd="@dimen/dp_2"
+                    android:alpha="0.7"
+                    android:text="AI建议"
+                    android:textColor="@color/gold_label"
+                    android:textSize="@dimen/sp_10"
+                    tools:ignore="HardcodedText" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center_vertical"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/aioutput0"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/dp_8"
+                        android:ellipsize="end"
+                        android:singleLine="true"
+                        android:textColor="@color/text_primary"
+                        android:textSize="@dimen/sp_10" />
+
+                    <TextView
+                        android:id="@+id/aioutput1"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/dp_8"
+                        android:ellipsize="end"
+                        android:singleLine="true"
+                        android:text="AI正在准备中..."
+                        android:textColor="@color/text_primary"
+                        android:textSize="@dimen/sp_10"
+                        tools:ignore="HardcodedText" />
+
+                    <TextView
+                        android:id="@+id/aioutput2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/dp_8"
+                        android:ellipsize="end"
+                        android:singleLine="true"
+                        android:textColor="@color/text_primary"
+                        android:textSize="@dimen/sp_10" />
+                </LinearLayout>
+            </RelativeLayout>
+        </LinearLayout>
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/opponentsLine"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="对手剩：— / —"
-        android:textColor="@color/text_secondary"
-        android:textSize="10sp"
-        tools:ignore="HardcodedText" />
-
-    <TextView
-        android:id="@+id/aiLine"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:fontFamily="monospace"
-        android:text="AI：等待识别手牌…"
-        android:textColor="@color/brand_accent"
-        android:textSize="11sp"
-        android:maxEms="22"
-        android:maxLines="2"
-        tools:ignore="HardcodedText" />
-
 </LinearLayout>

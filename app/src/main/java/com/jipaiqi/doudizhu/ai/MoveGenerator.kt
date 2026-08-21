@@ -246,7 +246,8 @@ class MoveGenerator(hand: List<Int>) {
      */
     fun legalActions(rivalMove: List<Int>): List<List<Int>> {
         if (rivalMove.isEmpty()) {
-            return genAllMoves() + listOf(emptyList())
+            // We lead: any move is legal, but PASS is NOT (you must play).
+            return genAllMoves().map { it.sorted() }.distinctBy { it }
         }
         val rInfo = MoveDetector.getMoveType(rivalMove)
         if (rInfo.type == MoveType.WRONG) return listOf(emptyList())

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dark rounded panel background (matches original shape_af000000_10). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/overlay_dark" />
+    <corners android:radius="@dimen/dp_5" />
+</shape>
