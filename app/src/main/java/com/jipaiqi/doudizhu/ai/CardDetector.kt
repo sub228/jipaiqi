@@ -11,21 +11,18 @@ import java.io.File
 import java.nio.FloatBuffer
 
 /**
- * YOLOv8-family card detector running through ONNX Runtime.
+ * YOLOv5 card detector running through ONNX Runtime.
  *
  * Pipeline (per captured frame):
  *   1. Letterbox-resize the bitmap to [inputSize]×[inputSize].
  *   2. Normalize to [0,1], arrange as NCHW float buffer.
- *   3. Run the ONNX session — output shape (1, 4+nc, num_anchors).
- *   4. Decode boxes (cx, cy, w, h) + class scores per anchor.
+ *   3. Run the ONNX session — output shape (1, anchors, 5+nc).
+ *   4. Decode boxes (cx, cy, w, h) + objectness + class scores per anchor.
  *   5. NMS to dedupe overlapping boxes.
  *   6. Map class index → [Card] rank via [classToRank].
  *
- * If no `models/yolo_cards.onnx` is shipped in assets, [Detector.isLoaded]
- * returns false and the recognition pipeline falls back to pure OCR.
- *
- * Class index ordering convention (defined in [classToRank], editable):
- *   0:3 1:4 2:5 ... 12:2 13:BJ 14:RJ
+ * Class index ordering (from YOLOv5 model names):
+ *   0:A  1:2  2:3  3:4  4:5  5:6  6:7  7:8  8:9  9:10  10:J  11:Q  12:K  13:BJ  14:RJ
  */
 class CardDetector private constructor(
     private val env: OrtEnvironment,
@@ -73,10 +70,10 @@ class CardDetector private constructor(
         val inputTensor = OnnxTensor.createTensor(env, inputData, shape)
         return try {
             val out = session.run(mapOf(inputName to inputTensor))
-            val raw = decodeYoloOutput(out[0].value)
+            val rawDetections = decodeYoloV5Output(out[0].value)
             out.close()
-            // raw: list of (cx, cy, w, h, scores[nc])
-            val boxes = postprocess(raw, inputSize, scale, padW, padH, w, h)
+            // rawDetections: list of (cx, cy, w, h, score, classIndex)
+            val boxes = postprocess(rawDetections, inputSize, scale, padW, padH, w, h)
             boxes
         } finally {
             inputTensor.close()
@@ -117,44 +114,73 @@ class CardDetector private constructor(
     )
 
     /**
-     * Decode the YOLOv8 ONNX output. The output shape is (1, 4+nc, anchors):
-     * dimension 1 indexes "channels" (box coords + class scores), dimension
-     * 2 indexes anchors. OnnxRuntime-Java represents this 3-D float32
-     * tensor as `Array<Array<FloatArray>>` (= Array<Array<float[]>>), where
-     * the innermost `FloatArray` is the anchor dimension.
+     * Decode the YOLOv5 ONNX output.
      *
-     * We transpose it into the more convenient per-anchor layout
-     * `List<FloatArray>` of length `channels`.
+     * YOLOv5 output shape: (1, anchors, 5+nc) where:
+     *   - anchors = num anchor grid cells (e.g. 25200 for 640x640)
+     *   - 5 = cx, cy, w, h, objectness
+     *   - nc = number of class scores
+     *
+     * OnnxRuntime-Java represents this as a 3-D array:
+     *   Array<Array<FloatArray>> = [batch][anchors][channels]
+     *
+     * We transpose to per-anchor rows and compute final score = obj * cls_score.
      */
-    private fun decodeYoloOutput(raw: Any?): List<FloatArray> {
-        // raw is Array<Array<FloatArray>> of shape [1][4+nc][anchors].
+    private fun decodeYoloV5Output(raw: Any?): List<FloatArray> {
+        // raw is Array<Array<FloatArray>> of shape [1][anchors][5+nc]
         val outer = raw as? Array<*> ?: return emptyList()
         if (outer.isEmpty()) return emptyList()
-        val channels = outer[0] as? Array<*> ?: return emptyList()
-        if (channels.isEmpty()) return emptyList()
-        // Each channel entry is a FloatArray (primitive) of `anchors` floats.
-        val firstChannel = channels[0]
-        val rows = when (firstChannel) {
-            is FloatArray -> firstChannel.size
-            is Array<*> -> firstChannel.size
-            else -> return emptyList()
-        }
-        if (rows == 0) return emptyList()
-        val out = ArrayList<FloatArray>(rows)
-        for (r in 0 until rows) {
-            val row = FloatArray(channels.size)
-            for (c in 0 until channels.size) {
-                row[c] = when (val ch = channels[c]) {
-                    is FloatArray -> ch[r]
-                    is Array<*> -> (ch[r] as Number).toFloat()
-                    else -> 0f
+        val anchors = outer[0] as? Array<*> ?: return emptyList()
+        if (anchors.isEmpty()) return emptyList()
+
+        val nc = classToRank.size
+        val channelsPerAnchor = 5 + nc  // cx, cy, w, h, obj, cls0..cls(nc-1)
+
+        val out = ArrayList<FloatArray>()
+        for (anchorIdx in anchors.indices) {
+            val channelData = anchors[anchorIdx]
+            val channelArr = when (channelData) {
+                is FloatArray -> channelData
+                is Array<*> -> FloatArray(channelData.size) { (channelData[it] as Number).toFloat() }
+                else -> continue
+            }
+            if (channelArr.size < channelsPerAnchor) continue
+
+            val cx = channelArr[0]
+            val cy = channelArr[1]
+            val w = channelArr[2]
+            val h = channelArr[3]
+            val obj = channelArr[4]
+
+            // Find best class
+            var bestClass = -1
+            var bestScore = 0f
+            for (c in 0 until nc) {
+                val clsScore = channelArr[5 + c] * obj
+                if (clsScore > bestScore) {
+                    bestScore = clsScore
+                    bestClass = c
                 }
             }
+            if (bestClass < 0) continue
+
+            // row = [cx, cy, w, h, score, classIndex]
+            val row = FloatArray(6)
+            row[0] = cx
+            row[1] = cy
+            row[2] = w
+            row[3] = h
+            row[4] = bestScore
+            row[5] = bestClass.toFloat()
             out.add(row)
         }
         return out
     }
 
+    /**
+     * Post-process decoded detections: filter by confidence, convert
+     * from letterbox coords back to original bitmap coords, apply NMS.
+     */
     private fun postprocess(
         rows: List<FloatArray>,
         inputSize: Int,
@@ -165,33 +191,32 @@ class CardDetector private constructor(
         origH: Int,
     ): List<Detection> {
         val candidates = ArrayList<Detection>()
-        val nc = classToRank.size
         for (row in rows) {
-            // row = [cx, cy, w, h, scores...]
-            if (row.size < 4 + nc) continue
-            var bestClass = -1
-            var bestScore = confThreshold
-            for (c in 0 until nc) {
-                val s = row[4 + c]
-                if (s > bestScore) { bestScore = s; bestClass = c }
-            }
-            if (bestClass < 0) continue
+            // row = [cx, cy, w, h, score, classIndex]
+            if (row.size < 6) continue
+            val score = row[4]
+            if (score < confThreshold) continue
+
             val cx = row[0]
             val cy = row[1]
             val bw = row[2]
             val bh = row[3]
+            val classIdx = row[5].toInt()
+
             // Letterbox -> original frame coords
             val x1 = ((cx - bw / 2f) - padW) / scale
             val y1 = ((cy - bh / 2f) - padH) / scale
             val x2 = ((cx + bw / 2f) - padW) / scale
             val y2 = ((cy + bh / 2f) - padH) / scale
+
             // Clamp to original frame
             val l = x1.coerceIn(0f, origW.toFloat())
             val t = y1.coerceIn(0f, origH.toFloat())
             val r = x2.coerceIn(0f, origW.toFloat())
             val b = y2.coerceIn(0f, origH.toFloat())
-            val rank = classToRank[bestClass] ?: continue
-            candidates.add(Detection(rank, bestScore, RectF(l, t, r, b)))
+
+            val rank = classToRank[classIdx] ?: continue
+            candidates.add(Detection(rank, score, RectF(l, t, r, b)))
         }
         return nms(candidates)
     }
@@ -232,14 +257,26 @@ class CardDetector private constructor(
         private const val TAG = "CardDetector"
 
         /**
-         * Default YOLO class index → DouZero rank mapping.
-         * Order: 3,4,5,6,7,8,9,10,J,Q,K,A,2,BJ,RJ
+         * YOLOv5 class index → DouZero rank mapping.
+         * Model class names: A,2,3,4,5,6,7,8,9,T,J,Q,K,X,D
+         * Where T=10, X=小王(BJ), D=大王(RJ)
          */
         val DEFAULT_CLASS_TO_RANK: Map<Int, Int> = linkedMapOf(
-            0 to Card.R3, 1 to Card.R4, 2 to Card.R5, 3 to Card.R6,
-            4 to Card.R7, 5 to Card.R8, 6 to Card.R9, 7 to Card.R10,
-            8 to Card.RJ, 9 to Card.RQ, 10 to Card.RK, 11 to Card.RA,
-            12 to Card.R2, 13 to Card.BJ, 14 to Card.RJOKER
+            0 to Card.RA,    // A
+            1 to Card.R2,    // 2
+            2 to Card.R3,    // 3
+            3 to Card.R4,    // 4
+            4 to Card.R5,    // 5
+            5 to Card.R6,    // 6
+            6 to Card.R7,    // 7
+            7 to Card.R8,    // 8
+            8 to Card.R9,    // 9
+            9 to Card.R10,   // T (10)
+            10 to Card.RJ,   // J
+            11 to Card.RQ,   // Q
+            12 to Card.RK,   // K
+            13 to Card.BJ,   // X (小王/Small Joker)
+            14 to Card.RJOKER // D (大王/Big Joker)
         )
 
         /**
@@ -263,13 +300,13 @@ class CardDetector private constructor(
                     target.outputStream().use { input.copyTo(it) }
                 }
                 val session = env.createSession(target.absolutePath, opts)
-                val inputName = session.inputNames.firstOrNull() ?: "images"
-                val outputName = session.outputNames.firstOrNull() ?: "output0"
+                val inputName = session.inputNames.firstOrNull() ?: "input"
+                val outputName = session.outputNames.firstOrNull() ?: "output"
                 CardDetector(
                     env, session, inputName, outputName,
                     inputSize, classToRank, confThreshold, iouThreshold,
                 ).also {
-                    Log.i(TAG, "Loaded YOLO card detector: $inputName -> $outputName")
+                    Log.i(TAG, "Loaded YOLOv5 card detector: $inputName -> $outputName")
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "YOLO model not loaded; OCR-only mode. Reason: ${e.message}")
