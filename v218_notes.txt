@@ -1,0 +1,63 @@
+## 和原版 wz.apk 核对后发现并修复 7 处硬差异 (v2.1.7 -> v2.1.8)
+
+### 【最关键】tickFrame 线程模型：原版是纯同步执行，之前版本是协程异步 (scope.launch Default)
+- 后果：captureHandler 在协程 finally 才 re-arm postDelayed，一旦协程卡住，帧循环就死 -> 用户看到「绿灯亮、NCNN 已就绪、但 detCnt 永远=0」
+- 已修复：tickFrame 完全按 jadx 还原为同步执行，processFrameWithPipeline 用 runBlocking 在 captureHandler 线程内直接跑完，最后在统一的 finally 里 postDelayed(100L) + recycleBitmap + image.close()
+
+### 【NCNN 参数】原版 loadModel 第 4 个参数 platform 不是固定 6！
+- jadx NewFloatingWindowService.updateAiConfig (lines 778-790):
+  - if (cachedModelPlatform in [1..6]) 用 platform = cachedModelPlatform (MODE1 一般是 6)
+  - if (cachedModelPlatform < 1 或 > 6) **FALLBACK to platform = 1** (常见于首次启动 SessionManager 写入 SP 之前返回 0)
+- 之前版本只试 (0,0,6)，如果用户首次启动、SessionManager.modelPlatformSafe() 返回 0，NCNN 内部 preprocess 分支就错 -> Detect 永远 0 框
+- 已修复：启动时依次尝试 (0,0,6) -> (0,0,1)，每个都打 logcat (JiPaiQiApp [NCNN-LOAD] try/picked)，选首个 loadModel+Init 都 OK 的组合
+
+###  recreateCapturePipelineIfSizeChanged 缺少原版 2 个重建条件
+原版 FloatWindowActions (line 140-155) 重建 VirtualDisplay 的 4 个条件：
+  sizeMismatch || densityMismatch || surfaceInvalid || missingDisplay
+- 之前版本只判断了 sizeMismatch + missingDisplay，缺少 densityMismatch（华为智能分辨率动态切 DPI）和 surfaceInvalid（后台恢复 ImageReader Surface 失效）
+- 已修复：4 个条件全部对齐，日志里会打印 [CAPTURE:recreate_pipeline] 四个 bool + expected size + density
+
+###  缺少 lastVirtualDisplayDensity 一致性记录
+- 原版每次 createVirtualDisplay 成功后都写 lastVirtualDisplayDensity=d，下次检测不一致直接重建
+- 已补齐，vDensityLast 会出现在 [FRAME] OK 日志里
+
+---
+
+## 全链路调试日志 (v2.1.8 新增，限频避免 logcat 刷爆)
+
+### 30 秒抓日志命令（PC 端执行）：
+    adb logcat -c ; sleep 30 ; adb logcat -v threadtime -d | grep -E "ScreenCaptureService|NativeYoloPipeline|JiPaiQiApp|NCNN-LOAD|FRAME|STALL-CHECK|DETECT|CLUSTER" > /tmp/jipaiqi_v218.txt
+
+（没装 adb 就用「开发者选项->提交错误报告->完整报告」或第三方 logcat App 过滤同样 TAG）
+
+### 各 TAG 对应含义：
+
+#### 1. JiPaiQiApp (验证 NCNN 到底选了哪个 platform 参数)
+-  [NCNN-LOAD] try(0,0,6) -> loadModel=true
+-  [NCNN-LOAD] try(0,0,1) -> loadModel=true
+-  [NCNN-LOAD] PICKED (ai=0,cpu=0,plat=X)
+如果 try(6) loadModel=false 但 try(1) loadModel=true -> 说明之前 2.1.7 就是 platform 参数错！直接就好了。
+
+#### 2. ScreenCaptureService （帧链路：imageReader -> Bitmap -> pipeline）
+-  [CAPTURE:create_ir] mode=MODE1 size=WxH format=RGBX_8888(1) screen=XxY portrait=true/false
+  正常（华为 Mate80 竖屏 2848x1320）：size=2848x1320 portrait=true screen=1320x2848
+  如果这里 size=1320x2848 portrait=true -> 宽高交换反了！就是问题！
+
+-  [CAPTURE:create_vd] mode=MODE1 size=WxH density=D flag=16
+  证明 VirtualDisplay 真创建成功了（如果没有这行，就是 projection 被系统回收了）
+
+-  [FRAME] OK bitmaps: raw=XxY@ARGB_8888 prepared=XxY reader=... detCnt=N handCnt=M nullRate=R% ...
+  每 3 秒 1 次。detCnt=YoloAPI.Detect 返回的检测框数。detCnt>0 就是 YOLO 工作了，接下来就是聚类的问题。
+
+-  [STALL-CHECK] ...（启动后没拿到过帧 OR 卡壳>5秒 就会打印一大段状态）
+  这是最重要的诊断块，包含：ScreenMetrics、imageReader 尺寸、acquireLatestImage 结果、projection/vd 是否 null、NativeYoloReady、detCnt/handCnt、nullRate 空帧率。
+
+#### 3. NativeYoloPipeline （NCNN 检测 + 聚类）
+-  [DETECT=0] bitmap=XxY@ARGB_8888 rowBytes=Y byteCount=Z handRowTopPct=0.66
+  detCnt=0 时才会打（3 秒一次），告诉你输入位图是否正常（比如 prepareFrameBitmap 把 prepared 搞成 0x0 或 recycled）。
+
+-  [DETECT=54] first5=L24/A@(632,2275)152x209p=0.97 ... yMax=2600 yMin=150
+  检测到框时，打印前 5 个（label+坐标+尺寸+置信度）+ yMin/yMax（可以判断 box 是否都跑到图像外了）。
+
+-  [CLUSTER] rows=6 minHandCards=6 cutLinePx=1879 bitmap=1320x2848 -> rows=7@178 | 4@556 | 8@830 | 6@1210 | 3@1520 | 17@2560
+  每个簇的盒子数+中心y坐标，对照 cutLine 就能看出为什么 handRow 没选上（比如最大簇 17boxes 在 y=2560，cutLine=1879 -> handRow 就应该是这个簇）。

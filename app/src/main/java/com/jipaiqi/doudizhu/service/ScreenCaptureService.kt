@@ -83,6 +83,14 @@ class ScreenCaptureService : Service() {
     @Volatile private var lastSeenW:    Int = -1
     @Volatile private var lastSeenH:    Int = -1
     @Volatile private var lastSeenDpi:  Int = -1
+    @Volatile private var lastVirtualDisplayDensity: Int = -1  // 原版 FloatWindowActions 一致性校验
+    @Volatile private var lastFrameOkMs:       Long = 0L
+    @Volatile private var lastFrameAttemptMs:  Long = 0L
+    @Volatile private var consecutiveNullFrames:Long = 0L
+    @Volatile private var lastDebugLogMs:      Long = 0L
+    @Volatile private var totalAttempts:       Long = 0L
+    @Volatile private var totalNulls:          Long = 0L
+    @Volatile private var totalBitmapNulls:    Long = 0L
 
     /** 斗地主固定为 MODE1 (wz.apk default) */
     enum class Mode { MODE1, MODE2, MODE3, MODE4 }
@@ -163,70 +171,173 @@ class ScreenCaptureService : Service() {
     }
 
     // ─── frameCaptureRunnable (NewFloatingWindowService 100 ms CAS loop) ─
+    //  注意：原版是**纯同步**执行（在 captureHandler 线程里从 acquireLatestImage 到
+    //  processCapturedBitmap → recycleBitmap → postNextFrameCapture 一次性跑完）。
+    //  之前的 scope.launch 异步切换到 Default 线程会产生 3 个副作用：
+    //    1) captureHandler 在协程 finally 里才 re-arm postDelayed，一旦协程卡住
+    //       帧循环直接死（看起来就是：绿灯亮，NCNN 就绪，但 detCnt 永远 0）。
+    //    2) Bitmap.prepareFrameBitmap → YoloAPI.Detect 的 pixelBuffer 在
+    //       Kotlin/ART 跨线程传递时偶尔被 heap trim 提前回收（无日志 但 JNI
+    //       lockPixels 返回 nullptr）。
+    //    3) 原版 NewFloatingWindowService 的帧 stall 检测（FRAME_STALL_THRESHOLD_MS
+    //       = 5000ms）依赖 lastFrameAttemptMs / lastFrameOkMs 在同一线程顺序更新，
+    //       协程打破了这个单调时序。
+    //  → 按 jadx 还原：**完全同步**执行，最后在 finally 里统一 postDelayed。
     private fun tickFrame() {
         val handler = captureHandler ?: return
         if (!frameProcessing.compareAndSet(false, true)) {
             handler.postDelayed(runnableWrapper, 100L)
             return
         }
+        var bmp: Bitmap? = null
+        var image: Image? = null
         try {
-            // ── REFRESH screen metrics every single tick. ───────────────
-            //    wz.apk FloatWindowInteractionCoordinator::handleConfigurationChanged
-            //    re-reads DisplayMetrics whenever the underlying surface is
-            //    recreated.  On Huawei "智能分辨率" devices, screen WxH can
-            //    change mid-hand from 2848×1320 to 2340×1080 (and vice
-            //    versa) without a ConfigurationChanged broadcast, so the
-            //    only reliable way is to poll each frame.
+            lastFrameAttemptMs = System.currentTimeMillis()
+            totalAttempts++
+
+            // ── REFRESH screen metrics every single tick (原版 FloatWindowInteractionCoordinator) ──
             captureScreenMetrics()
             if (imageReader == null ||
                 mScreenWidth != lastSeenW || mScreenHeight != lastSeenH ||
                 mScreenDensity != lastSeenDpi) {
-                Log.i(TAG, "screen dims changed $lastSeenW x $lastSeenH → " +
-                        "$mScreenWidth x $mScreenHeight; recreating pipeline")
+                Log.i(TAG, "[FRAME] screen dims changed ${lastSeenW}x${lastSeenH}@${lastSeenDpi} → " +
+                        "${mScreenWidth}x${mScreenHeight}@${mScreenDensity}; recreating pipeline")
                 lastSeenW = mScreenWidth; lastSeenH = mScreenHeight
                 lastSeenDpi = mScreenDensity
                 recreateCapturePipelineIfSizeChanged()
             }
 
-            val image = imageReader?.let { r ->
-                try { r.acquireLatestImage() } catch (_: Throwable) { null }
+            val ir = imageReader
+            if (ir == null) {
+                maybeLogCaptureDebug("frame_skip", "imageReader=null; " +
+                        "projectionAlive=${projection != null}, vd=${virtualDisplay != null}, " +
+                        "reader=ir_null")
+                consecutiveNullFrames++
+                handleFrameStallIfNeeded()
+                return
             }
 
-            if (image != null) {
-                var released = false
-                var bmp: Bitmap? = null
-                try {
-                    bmp = copyImagePlaneToBitmap(image, image.width, image.height)
-                    if (bmp != null) {
-                        val prepared = prepareFrameBitmap(bmp)
-                        val finalBmp = bmp
-                        scope.launch {
-                            try {
-                                processFrameWithPipeline(prepared)
-                            } catch (t: Throwable) {
-                                Log.w(TAG, "pipeline err: ${t.message}", t)
-                            } finally {
-                                if (prepared !== finalBmp) runCatching { prepared.recycle() }
-                                runCatching { finalBmp.recycle() }
-                                if (!released) { released = true; runCatching { image.close() } }
-                                frameProcessing.set(false)
-                                captureHandler?.postDelayed(runnableWrapper, 100L)
-                            }
-                        }
-                        return
-                    }
-                } finally {
-                    if (!released) { released = true; runCatching { image.close() } }
-                }
+            image = try { ir.acquireLatestImage() } catch (_: Throwable) { null }
+            if (image == null) {
+                totalNulls++
+                consecutiveNullFrames++
+                maybeLogCaptureDebug("acquireLatestImage=null",
+                        "attempts=$totalAttempts null_rate=${totalNulls*100.0/max(1,totalAttempts)}%.1f " +
+                        "reader=${ir.width}x${ir.height}fmt=${ir.imageFormat} " +
+                        "vd=${virtualDisplay != null}")
+                handleFrameStallIfNeeded()
+                return
             }
+
+            bmp = copyImagePlaneToBitmap(image, image.width, image.height)
+            if (bmp == null) {
+                totalBitmapNulls++
+                consecutiveNullFrames++
+                maybeLogCaptureDebug("imageToBitmap=null",
+                        "planes=${image.planes?.size} pixelStride=${image.planes?.getOrNull(0)?.pixelStride} " +
+                        "rowStride=${image.planes?.getOrNull(0)?.rowStride} " +
+                        "image=${image.width}x${image.height} @fmt${image.format}")
+                return
+            }
+
+            // 原版逻辑在这里：onFrameRecovered / updateRecordIconOnMain(true, "frame_ok")
+            consecutiveNullFrames = 0
+            lastFrameOkMs = System.currentTimeMillis()
+
+            val prepared = prepareFrameBitmap(bmp)
+            // ── 原版是同步执行 processCapturedBitmap，这里在当前 captureHandler
+            //    线程直接 runBlocking 调用 NativeYoloPipeline.processFrame，
+            //    保持帧线程模型完全一致。 ──
+            runCatching {
+                kotlinx.coroutines.runBlocking {
+                    processFrameWithPipeline(prepared)
+                }
+            }.onFailure { t ->
+                Log.w(TAG, "[FRAME] sync pipeline err: ${t.message}", t)
+            }
+
+            // 每 ~3 秒（原版 CAPTURE_DEBUG_LOG_INTERVAL_MS=1000，这里放宽到 3 秒
+            // 避免 logcat 刷爆）打一次：Bitmap尺寸+YoloAPI.Detect返回数+前5框
+            val now = System.currentTimeMillis()
+            if (now - lastDebugLogMs > 3000L) {
+                lastDebugLogMs = now
+                Log.i(TAG, "[FRAME] OK bitmaps: raw=${bmp.width}x${bmp.height}@${bmp.config} " +
+                        "prepared=${prepared.width}x${prepared.height} reader=${ir.width}x${ir.height} " +
+                        "screen=${mScreenWidth}x${mScreenHeight}@${mScreenDensity}dpi " +
+                        "detCnt=$sLastFrameDetections handCnt=$sLastFrameHandCount " +
+                        "nullRate=${totalNulls*100.0/max(1,totalAttempts)}%.1f " +
+                        "totalAttempts=$totalAttempts mode=$currentMode " +
+                        "vDensityLast=$lastVirtualDisplayDensity")
+            }
+
+            if (prepared !== bmp) runCatching { prepared.recycle() }
         } catch (t: Throwable) {
-            Log.w(TAG, "frame loop error: ${t.message}", t)
+            Log.e(TAG, "[FRAME] capture loop failed", t)
+            // 原版 ScreenCaptureMonitorCoordinator.reportIssue
+            handleFrameStallIfNeeded()
+        } finally {
+            runCatching { bmp?.recycle() }
+            runCatching { image?.close() }
+            frameProcessing.set(false)
+            handler.postDelayed(runnableWrapper, 100L)
         }
-        frameProcessing.set(false)
-        handler.postDelayed(runnableWrapper, 100L)
     }
 
     private val runnableWrapper: Runnable = Runnable { tickFrame() }
+
+    /** 原版 FRAME_STALL_THRESHOLD_MS = 5000ms：超过 5 秒没拿到有效帧 →
+     *  在 logcat 里一次性输出当前所有状态，方便用户贴日志定位。 */
+    private fun handleFrameStallIfNeeded() {
+        val now = System.currentTimeMillis()
+        if (lastFrameOkMs > 0 && now - lastFrameOkMs < 5000L) return
+        val now2 = now
+        if (now2 - lastDebugLogMs < 5000L) return
+        lastDebugLogMs = now2
+
+        val irW = imageReader?.width ?: -1
+        val irH = imageReader?.height ?: -1
+        val irFmt = imageReader?.imageFormat ?: -1
+        val irPlanesStr = runCatching {
+            imageReader?.imageFormat?.let {
+                val ir = imageReader
+                val img = try { ir?.acquireLatestImage() } catch (_: Throwable) { null }
+                val info = if (img == null) {
+                    "no-image-acquirable"
+                } else {
+                    val ps = img.planes?.getOrNull(0)
+                    "img=${img.width}x${img.height}fmt=${img.format} " +
+                            "plane[0].ps=${ps?.pixelStride} rs=${ps?.rowStride} " +
+                            "bufSz=${ps?.buffer?.remaining()}"
+                }.also { runCatching { img?.close() } }
+                info
+            }
+        }.getOrNull() ?: "unknown"
+
+        val core = runCatching { (application as JiPaiQiApp).core }.getOrNull()
+        Log.w(TAG, "═══════════════════════════════════════════════════════")
+        Log.w(TAG, "[STALL-CHECK] ${if (lastFrameOkMs == 0L) "no-successful-frame-yet (启动后)" else "stuck>5s  since_last_ok"}")
+        Log.w(TAG, "  ScreenMetrics w=$mScreenWidth h=$mScreenHeight dpi=$mScreenDensity " +
+                "portrait=${isPortrait()} expectedSz=${expectedCaptureSize().joinToString("x")}")
+        Log.w(TAG, "  imageReader=$irW x $irH fmt=$irFmt (1=RGBX_8888) maxImages=5")
+        Log.w(TAG, "  imageReader acquireLatestImage()  → $irPlanesStr")
+        Log.w(TAG, "  projection=${projection != null} vd=${virtualDisplay != null} " +
+                "vdDensity=$lastVirtualDisplayDensity vs screenDensity=$mScreenDensity")
+        Log.w(TAG, "  currentMode=$currentMode; extractNativeLibs=true ABI=arm64-v8a")
+        Log.w(TAG, "  NativeYoloReady=${core?.nativeYoloReady ?: false}")
+        Log.w(TAG, "  totalAttempts=$totalAttempts; nullImg=$totalNulls nullBmp=$totalBitmapNulls; " +
+                "nullImgRate=${totalNulls * 100.0 / max(1, totalAttempts)}%.1f")
+        Log.w(TAG, "  detCnt=$sLastFrameDetections handCnt=$sLastFrameHandCount")
+        Log.w(TAG, "═══════════════════════════════════════════════════════")
+    }
+
+    /** 频率限流（每 1000ms 最多 1 条）的 capture debug 日志，
+     *  对齐原版 CAPTURE_DEBUG_LOG_INTERVAL_MS。 */
+    private fun maybeLogCaptureDebug(reason: String, detail: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastDebugLogMs < 1000L) return
+        lastDebugLogMs = now
+        Log.d(TAG, "[CAPTURE:$reason] $detail")
+    }
 
     @Volatile var lastFrameHandCount:   Int = 0
     @Volatile var lastFrameDetections:  Int = 0
@@ -269,6 +380,9 @@ class ScreenCaptureService : Service() {
 
         val maxImages = if (currentMode == Mode.MODE2) 12 else 5
         // format = 1 = PixelFormat.RGBX_8888 (wz.apk hard-coded literal)
+        Log.i(TAG, "[CAPTURE:create_ir] mode=$currentMode size=${w}x${h} " +
+                "format=RGBX_8888(1) maxImages=$maxImages force=$force " +
+                "screen=${mScreenWidth}x${mScreenHeight} portrait=${isPortrait()}")
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, maxImages)
     }
 
@@ -276,30 +390,51 @@ class ScreenCaptureService : Service() {
         val p = projection ?: return
         val r = imageReader ?: return
         val surface = runCatching { r.surface }.getOrNull()
-        if (surface == null || !surface.isValid) return
+        if (surface == null || !surface.isValid) {
+            Log.w(TAG, "[CAPTURE:vd_invalid] surface=$surface isValid=${surface?.isValid}")
+            return
+        }
         if (virtualDisplay != null) return
         val size = expectedCaptureSize()
         val d = mScreenDensity
-        if (size[0] <= 0 || size[1] <= 0 || d <= 0) return
+        if (size[0] <= 0 || size[1] <= 0 || d <= 0) {
+            Log.w(TAG, "[CAPTURE:vd_invalid] size=${size.joinToString("x")} density=$d")
+            return
+        }
         // flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC)
         try {
+            Log.i(TAG, "[CAPTURE:create_vd] mode=$currentMode size=${size[0]}x${size[1]} density=$d flag=16")
             virtualDisplay = p.createVirtualDisplay(
                 "screen-mirror", size[0], size[1], d,
                 /* flags = */ 16, surface, null, null)
+            lastVirtualDisplayDensity = d
         } catch (t: Throwable) {
             Log.e(TAG, "createVirtualDisplay failed", t)
         }
     }
 
+    // 原版 recreateCapturePipelineIfSizeChanged：多了 densityMismatch 和 surfaceInvalid
+    // 两个重建条件。原版 FloatWindowActions 第 140..155 行：
+    //     z = sizeMismatch || z2(densityMismatch) || z3(surfaceInvalid) || z4(missingDisplay)
     private fun recreateCapturePipelineIfSizeChanged() {
+        if (projection == null) return
         val size = expectedCaptureSize()
         val r = imageReader
         val sizeMismatch = if (r != null) r.width != size[0] || r.height != size[1] else true
+        val densityMismatch = (lastVirtualDisplayDensity > 0 && mScreenDensity > 0 &&
+                lastVirtualDisplayDensity != mScreenDensity)
+        val surfaceInvalid = r != null && runCatching {
+            val s = r.surface; s == null || !s.isValid
+        }.getOrDefault(true)
         val missingDisplay = virtualDisplay == null
-        if (sizeMismatch || missingDisplay) {
+        if (sizeMismatch || densityMismatch || surfaceInvalid || missingDisplay) {
+            Log.i(TAG, "[CAPTURE:recreate_pipeline] sizeMismatch=$sizeMismatch " +
+                    "densityMismatch=$densityMismatch (prev=$lastVirtualDisplayDensity " +
+                    "now=$mScreenDensity) surfaceInvalid=$surfaceInvalid " +
+                    "missingVD=$missingDisplay expected=${size[0]}x${size[1]}")
             runCatching { virtualDisplay?.release() }; virtualDisplay = null
+            lastVirtualDisplayDensity = -1
             createImageReader(force = true)
-            // Recreate virtualDisplay ONLY when dimensions are valid.
             if (mScreenWidth > 0 && mScreenHeight > 0 && mScreenDensity > 0) virtualDisplay()
         }
     }

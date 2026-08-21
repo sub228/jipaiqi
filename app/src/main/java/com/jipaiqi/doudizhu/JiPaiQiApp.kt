@@ -62,6 +62,18 @@ class JiPaiQiApp : Application() {
         /** Legacy fallback pipeline. */
         var pipeline: RecognitionPipeline? = null
             private set
+        /** Remember which (aiModel, cpuGpu, platform) actually succeeded,
+         *  so the diagnostic log can tell the user (and the pipeline can
+         *  auto-fallback if the hardcoded MODE1=6 turns out to be wrong
+         *  for their specific SessionManager.modelPlatformSafe() value). */
+        @Volatile var lastLoadArgs: Triple<Int, Int, Int>? = null
+        @Volatile var lastLoadOk:   Boolean = false
+        @Volatile var lastInitOk:   Boolean = false
+        /** Number of consecutive frames where Detect() returned 0 boxes
+         *  even though the model was loaded.  The pipeline uses this to
+         *  trigger a platform-param fallback on-the-fly. */
+        @Volatile var nativeConsecutiveZeroDetections: Long = 0L
+        @Volatile var platformFallbackTried: Boolean = false
 
         @Volatile var ready = false
             private set
@@ -94,18 +106,49 @@ class JiPaiQiApp : Application() {
             // never reads yolo_n.bin/param and every Detect() returns [].
             nativeYolo = runCatching {
                 val loader = Yolov8Ncnn()
-                val loadOk = loader.loadModel(
-                    app.assets,
-                    Yolov8Ncnn.AI_MODEL_DEFAULT,   // 0 → yolo_n
-                    Yolov8Ncnn.CPU_GPU_DEFAULT,    // 0 → CPU (no Vulkan deps)
-                    Yolov8Ncnn.PLATFORM_MODE1      // 6 → MODE1 (斗地主 mode)
+                // NOTE — jadx NewFloatingWindowService.updateAiConfig lines
+                // 778..790: if cachedModelPlatform < 1 OR > 6 then the platform
+                // passed into loadModel() FALLS BACK to 1.  If it is IN [1..6]
+                // then cachedModelPlatform itself is used (line 780 r7=6 = MODE1).
+                //
+                // Earlier v2.1.6/2.1.7 hard-coded only platform=6.  On some
+                // Huawei phones, SessionManager.modelPlatformSafe() actually
+                // returns 0 during the very first start before the Flutter
+                // side writes SharedPreferences — so wz.apk itself goes
+                // through the "fallback to platform=1" branch.  This is the
+                // #1 candidate for "NCNN loaded but 0 detections".
+                //
+                // We therefore try the two plausible default combinations
+                // FIRST, and log verbosely:
+                val candidateArgs = listOf(
+                    Triple(0, 0, 6),  // [A] MODE1 default (wz.apk line 780 when platform∈[1,6])
+                    Triple(0, 0, 1)   // [B] generic fallback (wz.apk line 784 when platform∉[1..6])
                 )
-                Log.i(TAG, "Yolov8Ncnn.loadModel(0,0,6) → $loadOk")
-                if (!loadOk) throw IllegalStateException("loadModel returned false")
-                val api = YoloAPI()
-                val initOk = api.Init()
-                Log.i(TAG, "Native YOLO Init() returned ok=$initOk")
-                if (initOk) api else null
+                var picked: Pair<Triple<Int, Int, Int>, YoloAPI>? = null
+                for (args in candidateArgs) {
+                    val loadOk = runCatching {
+                        loader.loadModel(app.assets, args.first, args.second, args.third)
+                    }.getOrDefault(false)
+                    lastLoadArgs = args; lastLoadOk = loadOk
+                    Log.i(TAG, "[NCNN-LOAD] try(${args.first},${args.second},${args.third}) " +
+                            "→ loadModel=$loadOk")
+                    if (!loadOk) continue
+                    val api = YoloAPI()
+                    val initOk = runCatching { api.Init() }.getOrDefault(false)
+                    lastInitOk = initOk
+                    Log.i(TAG, "           → YoloAPI.Init()=$initOk")
+                    if (initOk) { picked = args to api; break }
+                }
+                if (picked == null) throw IllegalStateException(
+                    "[NCNN-LOAD] FAIL: all attempts failed. " +
+                            "last args=$lastLoadArgs load=$lastLoadOk init=$lastInitOk; " +
+                            "see ABI filter in build.gradle.kts (arm64-v8a+armeabi-v7a only)")
+                Log.i(TAG, "[NCNN-LOAD] PICKED (ai=${picked.first.first}, " +
+                        "cpu=${picked.first.second}, plat=${picked.first.third}).  " +
+                        "If frames still return DETECT=0, the issue is in " +
+                        "ImageReader/prepareFrameBitmap (see ScreenCaptureService " +
+                        "[FRAME] / [STALL-CHECK] logs).")
+                picked.second
             }.getOrElse { t ->
                 Log.e(TAG, "Native YOLO failed: ${t.message}", t); null
             }

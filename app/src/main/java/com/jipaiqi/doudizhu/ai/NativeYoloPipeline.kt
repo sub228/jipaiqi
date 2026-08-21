@@ -90,6 +90,32 @@ class NativeYoloPipeline(
                     "libyolov8ncnn.so present? yolo_n.bin in assets? ${t.message}", t)
             return FrameResult(emptyList(), emptyList(), 0, false, adaptiveHandYTopPx)
         }
+
+        // ── 每 3 秒打一次 Detect 结果：
+        //    0 框 → 详细说明输入尺寸（最常见是传入横屏 Bitmap 或者宽高交换反了）
+        //    ≥1 框 → 打印前 5 个 box (label, labelName, x, y, w, h, prob)
+        val now = System.currentTimeMillis()
+        if (now - lastDetectLogMs > DETECT_LOG_INTERVAL_MS) {
+            lastDetectLogMs = now
+            val rows = dets.size
+            if (rows == 0) {
+                Log.w(TAG, "[DETECT=0] bitmap=${w}x${h}@${frame.config} " +
+                        "rowBytes=${frame.rowBytes} byteCount=${frame.byteCount} " +
+                        "isRecycled=${frame.isRecycled} " +
+                        "handRowTopPct=${screen.handRowTopPct} " +
+                        "expectedHandCards=${screen.expectedHandCards} " +
+                        "screen.regions=${screen}")
+            } else {
+                val head = dets.asSequence().take(5).map { o ->
+                    "L${o.label}/${o.labelName}@(${o.x.toInt()},${o.y.toInt()})" +
+                            "${o.w.toInt()}x${o.h.toInt()}p=%.2f".format(o.prob)
+                }.joinToString("  ")
+                Log.i(TAG, "[DETECT=$rows] first5=$head  screen=${w}x${h} " +
+                        "yMax=${dets.maxOfOrNull { it.y }?.toInt()} " +
+                        "yMin=${dets.minOfOrNull { it.y }?.toInt()}")
+            }
+        }
+
         if (dets.isEmpty()) return FrameResult(emptyList(), emptyList(), 0, false, adaptiveHandYTopPx)
 
         // ── 1-D y cluster: row_gap = 0.45 * median(box.h) ───────────────
@@ -106,6 +132,23 @@ class NativeYoloPipeline(
             }
         }
         val rows = clusters.map { it.finalize() }.sortedBy { it.yMean }
+        val minHandCards = (screen.expectedHandCards * 0.4f).toInt().coerceAtLeast(5)
+
+        // ── 聚类诊断（3秒一次，或者首帧>0 detections时）：打印各簇 size+ 中心y坐标
+        val rowsDiagDue = run {
+            val t = System.currentTimeMillis()
+            if (dets.isNotEmpty() && lastDetectLogMs == 0L) { true }
+            else t - lastDetectLogMs >= DETECT_LOG_INTERVAL_MS - 200L
+        }
+        if (rowsDiagDue) {
+            val handTopLine = (h * screen.handRowTopPct).toInt()
+            val rowDiag = rows.joinToString(" | ") { c ->
+                "${c.cards.size}boxes@yMean=${c.yMean.toInt()}"
+            }
+            Log.i(TAG, "[CLUSTER] rows=${rows.size} minHandCards=$minHandCards " +
+                    "handRowTopPct=${screen.handRowTopPct} cutLinePx=$handTopLine " +
+                    "bitmap=$w x $h → rows=$rowDiag")
+        }
 
         // ── Hand row = largest cluster with yMean >= 0.66h (screenAdaptions.json 66%) ──
         // NOTE: wz.apk screenAdaptions.json defines handsArea.default = ["66%","max","max","max"],
@@ -113,7 +156,6 @@ class NativeYoloPipeline(
         // as a hand card.  The previous 0.50h threshold was therefore picking up the
         // opponent count-box row and the mid-table play-area as the "hand" on high-dpi
         // 2848x1320 Mate80  screens.  Reverting to the literal constant from the JSON.
-        val minHandCards = (screen.expectedHandCards * 0.4f).toInt().coerceAtLeast(5)
         var handRow: Cluster? = rows
             .filter { it.cards.size >= minHandCards && it.yMean >= h * screen.handRowTopPct }
             .maxWithOrNull(compareBy<Cluster> { it.cards.size }.thenBy { it.yMean })
@@ -266,5 +308,10 @@ class NativeYoloPipeline(
     companion object {
         private const val TAG = "NativeYoloPipeline"
         private const val EMPTY_TABLE_CLEAR_FRAMES = 4
+
+        /** 节流打印：每 DETECT_LOG_INTERVAL_MS ms 最多 1 次检测框日志，
+         *  避免 YoloAPI 每帧都 return 0 时 logcat 被刷屏。 */
+        @Volatile private var lastDetectLogMs: Long = 0L
+        private const val DETECT_LOG_INTERVAL_MS = 3000L
     }
 }
