@@ -28,6 +28,12 @@ class ScreenAdaptation private constructor(private val ctx: Context) {
 
     /** Top-y (0..1) below which every detection counts as a hand card. */
     var handRowTopPct: Float = 0.66f
+    /** Number of cards the player should hold at the very start of the
+     *  hand.  Classic 3-player 斗地主 = 17; 4-player variants = 25 or 13.
+     *  Populated from `gameconfiguration.json:hand_card_nums`.  Used by
+     *  [NativeYoloPipeline] to set a *minimum* hand-cluster size so that
+     *  an opponent's 7-card 顺子 doesn't get misclassified as "my hand". */
+    var expectedHandCards: Int = 17
     /** Regions for the two opponent-count OCR strips (opponent head-shots). */
     var leftOpponentRect: PctRect  = PctRect(0.02f, 0.18f, 0.05f, 0.45f)
     var rightOpponentRect: PctRect = PctRect(0.02f, 0.18f, 0.55f, 0.95f)
@@ -38,15 +44,16 @@ class ScreenAdaptation private constructor(private val ctx: Context) {
 
     private fun parseAssets() {
         // 1) gameconfiguration.json — mostly the 3-player/4-player rule map.
-        //    Not strictly needed for recognition geometry, but good to validate.
         runCatching {
             ctx.assets.open("gameconfiguration.json").bufferedReader().use { r ->
                 val arr = JSONArray(r.readText())
                 val threeP = (0 until arr.length()).map { arr.getJSONObject(it) }
                     .firstOrNull { it.optString("key") == "doudizhu_3" }
                 if (threeP != null) {
+                    val hands = threeP.optInt("hand_card_nums", -1)
+                    if (hands in 10..40) expectedHandCards = hands
                     Log.i(TAG, "Loaded gameConfig: ${threeP.optString("name")} " +
-                        "hand=${threeP.optInt("hand_card_nums")} total=${threeP.optInt("total_cards")}")
+                        "hand=$expectedHandCards total=${threeP.optInt("total_cards")}")
                 }
             }
         }

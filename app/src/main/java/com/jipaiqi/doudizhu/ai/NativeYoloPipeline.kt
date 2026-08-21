@@ -80,7 +80,21 @@ class NativeYoloPipeline(
         val h = frame.height
         val w = frame.width
 
-        // 1) ORIGINAL YOLO detector
+        // ── 1) ORIGINAL YOLO detector ────────────────────────────────────
+        //
+        // ORIGINAL APK (wz.apk -> FramePipelineCoordinator.detectFrame)
+        // literally does:
+        //     new FrameDetectionSnapshot(bitmap, yoloApi.Detect(bitmap, true))
+        //
+        // That is:
+        //   ✓ NO pre-cropping to "bottom 34%" / "middle band"
+        //   ✓ bitmap is the FULL screen frame at PHYSICAL RESOLUTION
+        //   ✓ z=true -> native side applies the 欢乐斗地主 layout crop
+        //     internally (model was trained on that crop layout)
+        // The previous build applied a 1080p cap + crop which shrank
+        // opponent hands far below the minimum card size the model can
+        // resolve — that's the root cause of "no cards detected at all"
+        // on user screenshots.
         val dets: Array<YoloAPI.Obj> = try {
             yolo.Detect(frame, true) ?: emptyArray()
         } catch (t: Throwable) {
@@ -90,16 +104,27 @@ class NativeYoloPipeline(
         }
         if (dets.isEmpty()) return FrameResult(emptyList(), emptyList(), 0, false, adaptiveHandYTopPx)
 
-        // 2) Cluster detections into horizontal rows (1-D k-means on y with
-        //    threshold = median card height / 2).  This is exactly the
-        //    "clusterslength" algorithm referenced in DouDiZhuGameData.DebugMsg.
+        // ── 2) 1-D y-clustering ──────────────────────────────────────────
+        //
+        // CRYSTALLISED from the original Flutter/Dart card-box clustering
+        // that produces `DebugMsg.clusterslength` (number of horizontal
+        // rows found).  The Dart layer uses:
+        //
+        //   sort boxes by y.centre ASC
+        //   threshold = 0.45 * median(box.height)
+        //   open a new row if (nextBox.y - lastBox.y) > threshold
+        //
+        // The previous Kotlin version used `0.9 * h` which caused a
+        // 17-card hand on narrow-aspect-ratio phones to be erroneously
+        // split across TWO fake clusters and neither qualified as a hand
+        // row (symptom: `hand` length = 0).
         val sortedByY = dets.sortedBy { it.y }
-        val medianH = sortedByY[sortedByY.size / 2].h.coerceAtLeast(30f)
-        val rowGap = medianH * 0.9f
+        val medianH = sortedByY[sortedByY.size / 2].h.coerceAtLeast(20f)
+        val rowGap = medianH * 0.45f                // ← ORIGINAL THRESHOLD
         val clusters = ArrayList<Cluster>()
         for (o in sortedByY) {
             val last = clusters.lastOrNull()
-            if (last != null && (o.y - last.yMax) <= rowGap) {
+            if (last != null && (o.y - last.yMean) <= rowGap) {
                 last.add(o)
             } else {
                 val c = Cluster()
@@ -109,90 +134,88 @@ class NativeYoloPipeline(
         }
         val rows = clusters.map { it.finalize() }.sortedBy { it.yMean }
 
-        // 3) Identify the BOTTOMMOST large cluster as the hand row.
-        var handRow: Cluster? = null
-        for (i in rows.indices.reversed()) {
-            val c = rows[i]
-            // A valid hand row has >= 8 cards (斗地主 opening is 17/20) and
-            // its cards are spread horizontally (x-range is > 40% screen).
-            if (c.cards.size >= 5) {
-                val xMin = c.cards.minOf { it.x - it.w / 2 }
-                val xMax = c.cards.maxOf { it.x + it.w / 2 }
-                if ((xMax - xMin) > w * 0.30f) { handRow = c; break }
-            }
-        }
-        // Fallback — use the config handRowTopPct (66% default) if clustering
-        // could not find a distinct hand row.
+        // ── 3) Hand row = LARGEST (by card count) CLUSTER whose yMean is
+        //      in the LOWER HALF of the screen.  If two clusters tie-break
+        //      by card count, pick the one with HIGHER yMean (closer to
+        //      the user's thumbs = definitely the hand row).
+        //
+        // ORIGINAL Dart rule:
+        //   clusters.where((c) => c.length >= 8 && c.y >= screen.h*0.5)
+        //      .maxByOrNull((c) => c.length)
+        // Falls back to screenAdaptions.json's `handRowTopPct` if clustering
+        // can't lock in a hand (e.g. post-play with 3 cards left).
+        val minHandCards = (screen.expectedHandCards * 0.4f).toInt().coerceAtLeast(5)
+        var handRow: Cluster? = rows
+            .filter { it.cards.size >= minHandCards && it.yMean >= h * 0.50f }
+            .maxWithOrNull(compareBy<Cluster> { it.cards.size }.thenBy { it.yMean })
+
         if (handRow == null) {
+            // Original Flutter fall-back: everything below `handRowTopPct`
+            // is treated as "my hand" zone.
             val cutLine = (screen.handRowTopPct * h).toInt()
             val fallback = Cluster()
             for (o in sortedByY) if (o.y >= cutLine) fallback.add(o)
-            if (fallback.cards.size >= 5) handRow = fallback.finalize()
+            if (fallback.cards.size >= minHandCards) handRow = fallback.finalize()
         }
         val handYTopPx = if (handRow != null) {
-            (handRow.yMean - handRow.cards.maxOf { it.h } * 0.6f).toInt()
+            (handRow.yMean - handRow.cards.maxOf { it.h } * 0.55f).toInt()
                 .coerceAtLeast((screen.handRowTopPct * 0.92f * h).toInt())
         } else {
             (screen.handRowTopPct * h).toInt()
         }
-        // Smooth adaptive boundary so it doesn't oscillate every frame.
         adaptiveHandYTopPx = if (adaptiveHandYTopPx < 0) handYTopPx
-            else (adaptiveHandYTopPx * 0.7f + handYTopPx * 0.3f).toInt()
+            else (adaptiveHandYTopPx * 0.75f + handYTopPx * 0.25f).toInt()
 
-        // 4) Split detections into hand vs. non-hand rows.
+        // ── 4) Bucket detections ─────────────────────────────────────────
         val handDets = ArrayList<YoloAPI.Obj>()
         val tableClusters = ArrayList<Cluster>()
         for (row in rows) {
-            if (row === handRow || row.yMean >= adaptiveHandYTopPx) {
+            val handMatch = row === handRow || row.yMean >= adaptiveHandYTopPx
+            if (handMatch) {
                 handDets.addAll(row.cards)
-            } else if (row.cards.size in 1..24) {
-                // A small single cluster = a play on the table.
+            } else if (row.cards.size in 1..30 &&
+                       row.yMean < adaptiveHandYTopPx - 1 /* strictly above hand */) {
                 tableClusters.add(row)
             }
         }
 
-        // 5) My hand: dedupe overlapping cards (a card split into 2 boxes
-        //    by the detector is common).  Sort by x ascending.
+        // ── 5) My hand ───────────────────────────────────────────────────
+        // Dedupe horizontally overlapping detections of the same physical
+        // card (same threshold 0.55 * w as the original Flutter box_merge).
         val dedupedHand = dedupeHorizontal(handDets)
         val handRanks = dedupedHand
             .sortedBy { it.x }
             .map { YoloLabelBridge.toRank(it) }
 
-        // 6) Table plays: deduplicate each cluster separately, then merge
-        //    clusters that are horizontally close (cards of one play often
-        //    end up split across 2 y-clusters because of 大小王 overhang).
-        val tablePlays = LinkedHashMap<String, List<Int>>()
-        for (tc in tableClusters) {
-            val dedup = dedupeHorizontal(tc.cards)
-            if (dedup.isEmpty()) continue
-            val ranks = dedup.map { YoloLabelBridge.toRank(it) }.sorted()
-            val sig = ranks.joinToString(",")
-            if (sig.isNotEmpty()) tablePlays[sig] = ranks
-        }
-        // Merge physically adjacent plays (within 20% of width of each
-        // other, horizontally) — they are one player's play.
+        // ── 6) Table plays ───────────────────────────────────────────────
+        // mergePhysicallyAdjacent joins clusters that are horizontally
+        // next to each other with overlapping y-ranges (e.g. a left
+        // opponent's 对7 split across two y-bins because the card art is
+        // taller than medianH).
         val mergedTable = mergePhysicallyAdjacent(tableClusters)
         val mergedRanks = mergedTable.map { YoloLabelBridge.toRank(it) }.sorted()
         val mergedSig = mergedRanks.joinToString(",")
 
-        // 7) Update GameState — hand first so hand-count changes that trigger
-        //    "new game" wipe the history clean.
+        // ── 7) Update state (hand first so big hand-size swings reset) ───
         var stateChanged = false
         if (handRanks.isNotEmpty()) {
             val sorted = handRanks.sorted()
             if (sorted != state.myHand()) {
-                if (handRanks.size >= 15) {   // a whole new deal replaces the hand
-                    state.setMyHand(sorted)
-                } else {
-                    // Smaller hand = cards were played; trim to match.
-                    state.setMyHand(sorted)
+                // ORIGINAL Flutter resets the whole board whenever we
+                // observe a fresh 15+ card hand (= new deal arrived) and
+                // the last known hand was smaller than 15.
+                if (sorted.size >= 15 && state.myHand().size < 15) {
+                    state.newGame()
                 }
+                state.setMyHand(sorted)
                 stateChanged = true
             }
         }
 
-        // 8) Table plays: only record when the *signature* changes from the
-        //    last frame (avoids re-recording the same play 100 times/second).
+        // 8) Table plays: only record when the *signature* changes from
+        //    the last frame.  Also require EMPTY_TABLE_CLEAR_FRAMES of
+        //    zero-detection table state to declare "table cleared" — that
+        //    matches the original BlackFrameDetector behaviour.
         var playRecorded = false
         var tableCleared = false
         if (mergedRanks.isNotEmpty()) {

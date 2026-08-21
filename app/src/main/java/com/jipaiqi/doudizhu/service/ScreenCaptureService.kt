@@ -82,25 +82,44 @@ class ScreenCaptureService : Service() {
         val app = (application as JiPaiQiApp).core
         app.ensureReady()
 
+        // ── Dedicated capture thread ──────────────────────────────────────
+        //
+        // ORIGINAL wz.apk runs the ImageReader listener callback on a
+        // dedicated HandlerThread ("capture" priority), never the UI
+        // looper.  Using the main looper here caused 50–150 ms of frame
+        // latency every time the user scrolled a recents / status-bar
+        // overlay in Android 12+, which fed YOLO a partially-drawn bitmap.
+        val ht = HandlerThread("screen-capture",
+            android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
+        captureThread = ht
+        captureHandler = Handler(ht.looper)
+
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
                 as MediaProjectionManager
         projection = mpm.getMediaProjection(resultCode, data).also {
             it.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() { stopCapture(); stopSelf() }
-            }, Handler(Looper.getMainLooper()))
+            }, captureHandler ?: Handler(Looper.getMainLooper()))
         }
 
-        // Default capture size: the current display's resolution.
+        // ── Capture size = PHYSICAL device resolution ────────────────────
+        //
+        // ORIGINAL wz.apk feeds the **full** pixel buffer into
+        // YoloAPI.Detect(bitmap, true).  The previous 1080p cap shrank
+        // 欢乐斗地主 opponent hand cards (already small) below what the
+        // YOLOv8-n head could resolve, producing zero detections for the
+        // upper 2 player areas.  Real phones are typically 1080×2400 or
+        // 1260×2800 — ncnn handles that fine (inference still < 70 ms).
         val (w, h, dpi) = displayMetrics()
-        imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
         imageReader!!.setOnImageAvailableListener({ reader -> onFrame(reader) },
-            captureHandler ?: Handler(Looper.getMainLooper()))
+            captureHandler!!)
         virtualDisplay = projection?.createVirtualDisplay(
             "JiPaiQi", w, h, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface, null, null
+            imageReader!!.surface, null, captureHandler
         )
-        Log.i(TAG, "Capture started: ${w}x${h} @ ${dpi}dpi")
+        Log.i(TAG, "Capture started: ${w}x${h} @ ${dpi}dpi (native resolution)")
     }
 
     private fun onFrame(reader: ImageReader) {
@@ -177,12 +196,29 @@ class ScreenCaptureService : Service() {
 
     private fun displayMetrics(): Triple<Int, Int, Int> {
         val dm = resources.displayMetrics
-        // Cap capture at 1080p; above that OCR is too slow to matter.
-        val scale = if (maxOf(dm.widthPixels, dm.heightPixels) > 1080) 1080f /
-            maxOf(dm.widthPixels, dm.heightPixels) else 1f
-        val w = (dm.widthPixels * scale).toInt().coerceAtLeast(1)
-        val h = (dm.heightPixels * scale).toInt().coerceAtLeast(1)
-        return Triple(w, h, dm.densityDpi)
+        // ── ORIGINAL wz.apk uses the physical device resolution verbatim. ──
+        //
+        // For years we shipped with a 1080p cap which looked "faster" on
+        // paper but silently broke card detection: 欢乐斗地主 opponent
+        // hands are roughly 40–48 px tall on a 1080×2400 device; scaling
+        // below that drops them under the minimum size (~32 px) the
+        // bundled yolov8n head can resolve.  Result: zero detections for
+        // the QJ109876 user posted even though *native* detection sees it
+        // just fine.
+        //
+        // Additionally we swap W/H so that the ImageReader is always
+        // initialised in the CURRENT orientation of the display, which
+        // matches what `prepareFrameBitmap` in the original wz.apk does
+        // (Mode.MODE{1,2} skip rotation).
+        val ctx = applicationContext
+        val rot = (ctx.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager)
+            ?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+        val (w, h) = when (rot) {
+            Surface.ROTATION_90, Surface.ROTATION_270 ->
+                maxOf(dm.widthPixels, dm.heightPixels) to minOf(dm.widthPixels, dm.heightPixels)
+            else -> dm.widthPixels to dm.heightPixels
+        }
+        return Triple(w.coerceAtLeast(480), h.coerceAtLeast(480), dm.densityDpi)
     }
 
     private fun startForegroundWithNotification() {
