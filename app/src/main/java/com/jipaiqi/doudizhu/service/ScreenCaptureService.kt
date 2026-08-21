@@ -110,6 +110,18 @@ class ScreenCaptureService : Service() {
     //      则自动切到 RGBA_8888(1) 重试一次（部分国产机 HAL 只认 RGBA_8888）。
     @Volatile private var useFallbackFormat: Boolean = false
     @Volatile private var triedFallbackFormat: Boolean = false
+    // (C2b v2.2.2) 二级回退：RGBA_8888(1) 也失败满 500 帧 → 切 VD flag=16 为 0。
+    //       华为/荣耀部分机型 (Kirin 9010 + MagicOS 8+) 对 VIRTUAL_DISPLAY_FLAG_PUBLIC(16)
+    //       有静默限制（VD 看似创建成功 displayObj=true 实际 Surface 不推进）。
+    @Volatile private var useFallbackFlag: Boolean = false
+    @Volatile private var triedFallbackFlag: Boolean = false
+    // (C2c v2.2.2) 三级回退：flag=0 也失败满 500 帧 → 去掉 MODE1 的 W↔H 交换，
+    //       ImageReader 直接按竖屏尺寸 (mScreenWidth×mScreenHeight) 创建。
+    //       原理：天然横屏面板 (2848×1320) 上，让 reader 与虚拟屏双方都用竖屏尺寸
+    //       (1320×2848)，避免 MediaProjection 需要把肖像内容硬塞进横屏 Surface，
+    //       绕过 HWC composer 的 aspect-ratio 内部校验拒绝。
+    @Volatile private var useFallbackSizeNoSwap: Boolean = false
+    @Volatile private var triedFallbackSizeNoSwap: Boolean = false
     // (C3) ImageReader.OnImageAvailableListener（no-op）：
     //      必须存在 listener，否则 MediaProjection producer 从不 enqueue buffer，
     //      acquireLatestImage 永远返回 null（AOSP MediaProjectionService 行为）。
@@ -320,17 +332,20 @@ class ScreenCaptureService : Service() {
 
     private val runnableWrapper: Runnable = Runnable { tickFrame() }
 
+    // v2.2.2 新增：独立控制 stall 诊断输出的节流，不与 maybeLogCaptureDebug 共享
+    // lastDebugLogMs（否则每 1s 刷新一次，5s 节流永远满足不了）。
+    @Volatile private var lastStallCheckMs: Long = 0L
+
     /** 原版 FRAME_STALL_THRESHOLD_MS = 5000ms：超过 5 秒没拿到有效帧 →
      *  在 logcat 里一次性输出当前所有状态，方便用户贴日志定位。 */
     private fun handleFrameStallIfNeeded() {
         val now = System.currentTimeMillis()
         if (lastFrameOkMs > 0 && now - lastFrameOkMs < 5000L) return
-        val now2 = now
-        if (now2 - lastDebugLogMs < 5000L) return
-        lastDebugLogMs = now2
 
-        // (C2) v2.2.1 格式自动回退：启动后从未拿过成功帧 (lastFrameOkMs==0)
+        // (C2) v2.2.2 格式自动回退：启动后从未拿过成功帧 (lastFrameOkMs==0)
         //      且总尝试次数 >= 500（约 50 秒无图），切到 RGBA_8888(1) 重建一次。
+        //   重点：这个判断必须放在节流前面，否则 lastDebugLogMs 被 maybeLogCaptureDebug
+        //   每 1s 刷新一次 → 5s 节流永远不满足 → fallback 永远不触发。
         if (lastFrameOkMs == 0L && totalAttempts >= 500L && !triedFallbackFormat && !useFallbackFormat) {
             DLog.w(TAG, "[STALL:FORMAT_FALLBACK] totalAttempts=$totalAttempts success=0 RGBX_8888(2) → " +
                     "switching to RGBA_8888(1) and forcing pipeline rebuild. " +
@@ -344,8 +359,52 @@ class ScreenCaptureService : Service() {
             imageReader = null
             consecutiveRecreateFails = 0
             lastRecreateAttemptMs = 0L  // 清掉 throttle，让 tickFrame 下一轮立刻重建
+            lastStallCheckMs = now
             return  // 下一轮 tickFrame 里 imageReader==null → recreate
         }
+
+        // (C2b v2.2.2) 二级回退 — flag: 已切 RGBA_8888 + 再 500 帧 (attempts>=1000)
+        //       仍全部 null → 切 VIRTUAL_DISPLAY_FLAG_PUBLIC(16) → 默认 flag=0
+        if (lastFrameOkMs == 0L && useFallbackFormat && totalAttempts >= 1000L &&
+            !triedFallbackFlag && !useFallbackFlag) {
+            DLog.w(TAG, "[STALL:FLAG_FALLBACK] totalAttempts=$totalAttempts RGBA worked 0 frames; " +
+                    "VD flag=16(PUBLIC) → 0(DEFAULT). forcing rebuild (tier 2/3).")
+            useFallbackFlag = true
+            triedFallbackFlag = true
+            runCatching { virtualDisplay?.release() }; virtualDisplay = null
+            lastVirtualDisplayDensity = -1
+            runCatching { imageReader?.setOnImageAvailableListener(null, null); imageReader?.close() }
+            imageReader = null
+            consecutiveRecreateFails = 0
+            lastRecreateAttemptMs = 0L
+            lastStallCheckMs = now
+            return
+        }
+
+        // (C2c v2.2.2) 三级回退 — size no-swap: flag=0 也失败满 500 帧 (attempts>=1500)
+        //       → 去掉 MODE1 的 W↔H 交换，让 ImageReader/VD 都按屏幕肖像尺寸 (W×H 不swap)
+        //       创建，绕过 HWC composer 在天然横屏手机上的 aspect-ratio 内部限制。
+        if (lastFrameOkMs == 0L && useFallbackFlag && totalAttempts >= 1500L &&
+            !triedFallbackSizeNoSwap && !useFallbackSizeNoSwap) {
+            DLog.w(TAG, "[STALL:SIZE_NOSWAP_FALLBACK] totalAttempts=$totalAttempts flag=0+RGBA " +
+                    "still 0 frames; dropping MODE1 W↔H swap (reader W×H=screen W×H portrait) " +
+                    "forcing rebuild (tier 3/3). LAST fallback — if this also fails, please " +
+                    "restart 记牌器 → 重新授权录屏 and/or 关闭华为 智能分辨率。")
+            useFallbackSizeNoSwap = true
+            triedFallbackSizeNoSwap = true
+            runCatching { virtualDisplay?.release() }; virtualDisplay = null
+            lastVirtualDisplayDensity = -1
+            runCatching { imageReader?.setOnImageAvailableListener(null, null); imageReader?.close() }
+            imageReader = null
+            consecutiveRecreateFails = 0
+            lastRecreateAttemptMs = 0L
+            lastStallCheckMs = now
+            return
+        }
+
+        // 其余 stall 状态打印仍保留 5 秒节流，但改用独立的 lastStallCheckMs。
+        if (now - lastStallCheckMs < 5000L) return
+        lastStallCheckMs = now
 
         val irW = imageReader?.width ?: -1
         val irH = imageReader?.height ?: -1
@@ -377,7 +436,10 @@ class ScreenCaptureService : Service() {
         DLog.w(TAG, "  projection=${projection != null} vd=${virtualDisplay != null} " +
                 "vdDensity=$lastVirtualDisplayDensity vs screenDensity=$mScreenDensity")
         DLog.w(TAG, "  currentMode=$currentMode; extractNativeLibs=true ABI=arm64-v8a")
-        DLog.w(TAG, "  useFallbackFormat=$useFallbackFormat triedFallback=$triedFallbackFormat")
+        DLog.w(TAG, "  fallback (tier1 fmt)   : useFallbackFormat=$useFallbackFormat tried=$triedFallbackFormat")
+        val curFlag = if (useFallbackFlag) 0 else 16
+        DLog.w(TAG, "  fallback (tier2 flag)  : useFallbackFlag=$useFallbackFlag tried=$triedFallbackFlag → currentVDflag=$curFlag")
+        DLog.w(TAG, "  fallback (tier3 noswap): useFallbackSizeNoSwap=$useFallbackSizeNoSwap tried=$triedFallbackSizeNoSwap")
         DLog.w(TAG, "  NativeYoloReady=${core?.nativeYoloReady ?: false}")
         DLog.w(TAG, "  totalAttempts=$totalAttempts; nullImg=$totalNulls nullBmp=$totalBitmapNulls; " +
                 "nullImgRate=${"%.1f".format(totalNulls * 100.0 / max(1, totalAttempts))}%")
@@ -485,12 +547,14 @@ class ScreenCaptureService : Service() {
             DLog.w(TAG, "[CAPTURE:vd_invalid] size=${size.joinToString("x")} density=$d")
             return false
         }
-        // flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC)
+        // flags: 默认 16(VIRTUAL_DISPLAY_FLAG_PUBLIC)，(C2b)二级回退后切 0
+        val vdFlags = if (useFallbackFlag) 0 else 16
         try {
-            DLog.i(TAG, "[CAPTURE:create_vd] mode=$currentMode size=${size[0]}x${size[1]} density=$d flag=16")
+            DLog.i(TAG, "[CAPTURE:create_vd] mode=$currentMode size=${size[0]}x${size[1]} density=$d flag=$vdFlags" +
+                    if (useFallbackFlag) " [FLAG_FALLBACK]" else "")
             val vd = p.createVirtualDisplay(
                 "screen-mirror", size[0], size[1], d,
-                /* flags = */ 16, surface, null, null)
+                /* flags = */ vdFlags, surface, null, null)
             virtualDisplay = vd
             lastVirtualDisplayDensity = d
             // (C4) v2.2.1 深度校验：确认 Android 系统真的把虚拟屏幕挂起来了
@@ -505,7 +569,7 @@ class ScreenCaptureService : Service() {
             }
             if (!dispValid) {
                 DLog.w(TAG, "[CAPTURE:create_vd] WARNING: vd.display==null; " +
-                        "MediaProjection may have rejected size=${size[0]}x${size[1]}@$d flag=16. " +
+                        "MediaProjection may have rejected size=${size[0]}x${size[1]}@$d flag=$vdFlags. " +
                         "If frames are ALL NULL, try restarting screen recording.")
             }
             return true
@@ -624,6 +688,8 @@ class ScreenCaptureService : Service() {
 
     // wz.apk FloatWindowActions.expectedCaptureSize lines 158..166.
     private fun expectedCaptureSize(): IntArray {
+        // (C2c v2.2.2) 三级回退激活：跳过 MODE1 的 W↔H 交换，直接用屏幕肖像尺寸 (W×H)
+        if (useFallbackSizeNoSwap) return intArrayOf(mScreenWidth, mScreenHeight)
         val portrait = isPortrait()
         return if (currentMode == Mode.MODE1 && portrait) intArrayOf(mScreenHeight, mScreenWidth)
                else intArrayOf(mScreenWidth, mScreenHeight)
@@ -796,13 +862,13 @@ class ScreenCaptureService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(NotificationChannel(
-                CHANNEL_ID, "记牌器(v2.2.1 原版NCNN管线+listener修复)",
+                CHANNEL_ID, "记牌器(v2.2.2 原版NCNN+3级回退)",
                 NotificationManager.IMPORTANCE_LOW
             ))
         }
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("记牌器 AI 运行中")
-            .setContentText("wz.apk NCNN: setOnImageAvailableListener+RGBX8888→RGBA fallback+flag16")
+            .setContentText("v2.2.2 NCNN管线: 3级回退(RGBX→RGBA, flag16→0, W↔H noswap)")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()

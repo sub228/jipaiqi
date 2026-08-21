@@ -11,8 +11,8 @@ android {
         applicationId = "com.jipaiqi.doudizhu"
         minSdk = 26
         targetSdk = 34
-        versionCode = 221
-        versionName = "2.2.1"
+        versionCode = 222
+        versionName = "2.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -64,6 +64,11 @@ android {
             // files are present.  Using legacy packaging copies them into
             // /data/app/.../lib/ at install time which is 100% reliable.
             useLegacyPackaging = true
+            // v2.2.2: libyolov8ncnn.so 是原版 APK 里的预编译 .so，不再需要 NDK strip。
+            //        显式 keep-all 防止 AGP 8.x 因找不到 NDK strip 工具而报
+            //        "25.0.2" (默认 NDK 版本缺失) 导致构建直接失败。
+            doNotStrip += "**/*.so"
+            keepDebugSymbols += "**/*.so"
         }
         resources {
             excludes += listOf(

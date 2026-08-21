@@ -175,7 +175,7 @@ class FloatingWindowService : Service() {
         b.setting.setOnClickListener { toggle(b.showset) }
         b.setting.setOnLongClickListener {
             runCatching {
-                DLog.i(TAG, "⚙️ long-pressed: opening SettingsAndLogDialog (v2.2.1)")
+                DLog.i(TAG, "⚙️ long-pressed: opening SettingsAndLogDialog (v2.2.2)")
                 val dlg = SettingsAndLogDialog(this)
                 dlg.show()
                 true
@@ -251,27 +251,32 @@ class FloatingWindowService : Service() {
         updateStatusDots(b, core)
 
         val hasHand = snapshot.playerHandCards.isNotEmpty()
-        b.nostart.visibility = if (hasHand) View.GONE else View.VISIBLE
-        b.llNumList.visibility = if (hasHand) View.VISIBLE else View.GONE
-        b.line.visibility = if (hasHand) View.VISIBLE else View.GONE
+        // (v2.2.2) 始终显示记牌条（ll_num_list）和分隔线 line，与原版 APK 行为一致。
+        //         无手牌时显示初始牌数 (3-2 各 4 张, 王各 1 张)，已出+手牌后自动递减。
+        //         不再在 "等待牌局开始" 与 "记牌条" 之间二选一，记牌条永远可见。
+        b.nostart.visibility = View.GONE
+        b.llNumList.visibility = View.VISIBLE
+        b.line.visibility = View.VISIBLE
 
-        // ── Diagnostic overlay: surface the last NCNN frame statistics so
-        //    the user can tell (from the UI alone) whether YOLO is actually
-        //    seeing boxes.  Without this, "等待牌局正式开始" is ambiguous
-        //    between "clustering dropped the row" vs "YOLO saw nothing".
+        // ── Diagnostic overlay: surface the last NCNN frame statistics.
+        //    放在 3 个指示灯下方的 record_status_text (原来显示 "异常" 的小文字)，
+        //    不挤占记牌条空间；有手牌时保留 last 状态不自动隐藏。
         runCatching {
             val detCnt  = ScreenCaptureService.sLastFrameDetections
             val handCnt = ScreenCaptureService.sLastFrameHandCount
-            val nt = b.root.findViewById<TextView>(R.id.nostart_text)
-            if (nt != null && !hasHand) {
-                val prefix = when {
+            val statusTv = b.recordStatusText   // R.id.record_status_text under 3 dots
+            if (statusTv != null) {
+                val prefix: String = when {
+                    hasHand -> "已识别${snapshot.playerHandCards.size}张"
                     detCnt  >= 20 -> "NCNN=${detCnt}框/聚类中…"
                     detCnt  >  0 -> "NCNN=${detCnt}框/handCnt=$handCnt…"
                     core.nativeYoloReady -> "原版NCNN已就绪(等发牌或出牌画面)…"
                     else -> "识别核心未就绪…"
                 }
-                nt.text = prefix
-                nt.setTextColor(0xFF58E882.toInt())
+                statusTv.text = prefix
+                statusTv.setTextColor(0xFF58E882.toInt())   // 绿色，跟原版一致
+                statusTv.textSize = 9f                      // 8sp → 9sp，看得清
+                statusTv.visibility = View.VISIBLE
             }
         }
 
@@ -315,7 +320,15 @@ class FloatingWindowService : Service() {
             if (analyzeOk) R.drawable.floating_record_indicator_dot_ok
             else R.drawable.floating_record_indicator_dot
         )
-        b.recordStatusText.visibility = if (authOk && frameOk) View.GONE else View.VISIBLE
+        // (v2.2.2) record_status_text 被重新用作诊断信息 (NCNN状态/已识别张数)，
+        //          由 refresh() 末尾统一设置内容和可见性，这里不再强制隐藏。
+        //          只有当权限/帧捕获有异常时我们才显示一个默认红色占位（除非 refresh
+        //          已经写了诊断）。
+        if (!authOk || !frameOk) {
+            b.recordStatusText.text = if (!authOk) "未授权悬浮窗" else "录屏未启动"
+            b.recordStatusText.setTextColor(0xFFFFB3B3.toInt())
+            b.recordStatusText.visibility = View.VISIBLE
+        }
     }
 
     /** Render the last few plays as gold-tagged history lines. */
