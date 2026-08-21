@@ -3,6 +3,7 @@ package com.jipaiqi.doudizhu
 import android.app.Application
 import android.util.Log
 import com.example.qnjisuanqi.YoloAPI
+import com.example.qnjisuanqi.Yolov8Ncnn
 import com.jipaiqi.doudizhu.ai.CardDetector
 import com.jipaiqi.doudizhu.ai.CardOcr
 import com.jipaiqi.doudizhu.ai.DouZeroEngine
@@ -83,11 +84,28 @@ class JiPaiQiApp : Application() {
             // 2) ORIGINAL native YOLO (libyolov8ncnn.so).  This is the
             //    preferred recognizer.  It calls the ORIGINAL C++ NCNN
             //    trained weights (yolo_n.bin/param) straight from assets.
+            //
+            // CRITICAL PORT FIX — jadx NewFloatingWindowService.java lines
+            // 786..792 shows the ORIGINAL wz.apk ALWAYS calls
+            //   Yolov8Ncnn.loadModel(am, aiModel, cpuGpu, platform)
+            // BEFORE running yoloAPI.Init().  The C++ Net instance lives in
+            // a global *set* by loadModel; Init() just does a trivial
+            // post-warmup.  Without this explicit call, libyolov8ncnn.so
+            // never reads yolo_n.bin/param and every Detect() returns [].
             nativeYolo = runCatching {
+                val loader = Yolov8Ncnn()
+                val loadOk = loader.loadModel(
+                    app.assets,
+                    Yolov8Ncnn.AI_MODEL_DEFAULT,   // 0 → yolo_n
+                    Yolov8Ncnn.CPU_GPU_DEFAULT,    // 0 → CPU (no Vulkan deps)
+                    Yolov8Ncnn.PLATFORM_MODE1      // 6 → MODE1 (斗地主 mode)
+                )
+                Log.i(TAG, "Yolov8Ncnn.loadModel(0,0,6) → $loadOk")
+                if (!loadOk) throw IllegalStateException("loadModel returned false")
                 val api = YoloAPI()
-                val ok = api.Init()   // → loads yolo_n.bin/param via assets
-                Log.i(TAG, "Native YOLO Init() returned ok=$ok")
-                if (ok) api else null
+                val initOk = api.Init()
+                Log.i(TAG, "Native YOLO Init() returned ok=$initOk")
+                if (initOk) api else null
             }.getOrElse { t ->
                 Log.e(TAG, "Native YOLO failed: ${t.message}", t); null
             }
