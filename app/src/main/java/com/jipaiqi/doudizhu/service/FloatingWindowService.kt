@@ -430,5 +430,10 @@ class FloatingWindowService : Service() {
         fun start(context: Context) {
             context.startService(Intent(context, FloatingWindowService::class.java))
         }
+
+        fun stop(context: Context) {
+            try { context.stopService(Intent(context, FloatingWindowService::class.java)) }
+            catch (_: Throwable) { }
+        }
     }
 }
