@@ -189,8 +189,19 @@ class FloatingWindowService : Service() {
 
         // Opponents line (expanded mode only — already handled in summary when minimized).
         val left = snapshot.numCardsLeft
-        val oppLine = "对手剩：${left[Position.LANDLORD_UP]} / ${left[Position.LANDLORD_DOWN]}" +
-            if (snapshot.playerPosition == Position.LANDLORD) "" else " · 地:${left[Position.LANDLORD]}"
+        val mySize = snapshot.playerHandCards.size
+        val meLabel = when (snapshot.playerPosition) {
+            Position.LANDLORD -> "地主我"
+            Position.LANDLORD_UP -> "上(我)"
+            Position.LANDLORD_DOWN -> "下(我)"
+        }
+        val oppLine = if (snapshot.playerPosition == Position.LANDLORD) {
+            "我${mySize}·上${left[Position.LANDLORD_UP]} / 下${left[Position.LANDLORD_DOWN]}"
+        } else {
+            val otherFarmer = if (snapshot.playerPosition == Position.LANDLORD_UP)
+                Position.LANDLORD_DOWN else Position.LANDLORD_UP
+            "${meLabel}${mySize}·地${left[Position.LANDLORD]} / 农${left[otherFarmer]}"
+        }
         if (!minimized) b.opponentsLine.text = oppLine
 
         // AI recommendation (off-main thread, then update text).

@@ -84,9 +84,26 @@ class GameState {
     fun setMyPosition(p: Position) = lock.withLock { myPosition = p }
     fun setBottomCards(cards: List<Int>) = lock.withLock { bottomCards = cards.sorted() }
 
-    /** Replace my hand with [cards] (deduplicated, sorted). */
+    /** Replace my hand with [cards] (sorted, duplicates kept so count is accurate).
+     *  Also auto-detects my position when unambiguous:
+     *    17 cards -> I'm a farmer
+     *    20 cards -> I'm the landlord */
     fun setMyHand(cards: List<Int>) = lock.withLock {
-        myHand = cards.distinct().sorted()
+        val sorted = cards.sorted()
+        myHand = sorted
+        // Auto-detect position from the starting hand size, but only if the
+        // user hasn't explicitly changed it later (no explicit-tracking
+        // needed — the counts are clear enough at start of game that we
+        // don't overwrite deliberate changes).
+        val n = sorted.size
+        if (n == 20 && myPosition != Position.LANDLORD) {
+            myPosition = Position.LANDLORD
+        } else if (n == 17 && myPosition == Position.LANDLORD) {
+            // Default was LANDLORD but we clearly have a farmer-sized hand;
+            // pick LANDLORD_DOWN as default farmer role.  User can override
+            // from the main UI role radio.
+            myPosition = Position.LANDLORD_DOWN
+        }
     }
 
     /**
@@ -168,11 +185,20 @@ class GameState {
         playedByPosition[position]!!.toList()
     }
 
-    /** Number of cards remaining in each player's hand. */
+    /** Number of cards remaining in each player's hand.
+     *  For *my* position we use myHand.size directly (truth from recognition),
+     *  not "initial minus my plays" — recordPlay tracks other players' plays,
+     *  not mine, so the naive formula would otherwise keep showing the full
+     *  initial count forever.  For the other two positions we subtract the
+     *  plays we've observed from them. */
     fun numCardsLeft(): Map<Position, Int> = lock.withLock {
         val init = Position.values().associateWith { it.initialCards }
         init.mapValues { (pos, n) ->
-            (n - playedByPosition[pos]!!.size).coerceAtLeast(0)
+            if (pos == myPosition) {
+                myHand.size.coerceAtLeast(0)
+            } else {
+                (n - playedByPosition[pos]!!.size).coerceAtLeast(0)
+            }
         }
     }
 

@@ -30,11 +30,13 @@ class RecognitionPipeline(
     val region: RegionConfig = RegionConfig.default(),
 ) {
     data class RegionConfig(
-        /** y fraction at which "my hand" starts (0..1). */
-        val handYStart: Float = 0.78f,
+        /** y fraction at which "my hand" starts (0..1).
+         *  Typical 欢乐斗地主 layout: my hand sits near the bottom,
+         *  center y ~= 0.65..0.85.  So 0.58 reliably captures it all. */
+        val handYStart: Float = 0.58f,
         /** y fraction where "table play" lives (top of band). */
-        val tableYStart: Float = 0.30f,
-        val tableYEnd: Float = 0.55f,
+        val tableYStart: Float = 0.28f,
+        val tableYEnd: Float = 0.50f,
         /** Confidence required for YOLO when OCR disagrees. */
         val yoloWinConfidence: Float = 0.7f,
     ) {
