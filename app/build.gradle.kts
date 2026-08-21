@@ -54,6 +54,17 @@ android {
     }
 
     packaging {
+        jniLibs {
+            // Required because <application android:extractNativeLibs="true"> is set in
+            // AndroidManifest.xml.  Without this flag AGP 8+ would strip the
+            // embedded .so copies to save space but some Android 12 Samsung/
+            // Xiaomi launchers refuse to dlopen() a library mapped directly out
+            // of the APK ZIP — symptom: "tap icon → splash → immediate crash"
+            // with UnsatisfiedLinkError even though `unzip -l` shows the .so
+            // files are present.  Using legacy packaging copies them into
+            // /data/app/.../lib/ at install time which is 100% reliable.
+            useLegacyPackaging = true
+        }
         resources {
             excludes += listOf(
                 "/META-INF/{AL2.0,LGPL2.1}",

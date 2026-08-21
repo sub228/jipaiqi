@@ -89,9 +89,14 @@ class YoloLabelBridgeTest {
     }
 
     // -------- helpers --------
+    // NOTE: We intentionally use the static factory YoloAPI.newObjForTests()
+    // instead of `yolo.Obj()` directly.  This way we construct a data-only
+    // Obj without paying the System.loadLibrary("yolov8ncnn") class-init
+    // cost on the *host* JVM (which doesn't have an arm64 native library,
+    // so the load would throw were it not caught inside YoloAPI).
     private fun rankId(id: Int): Int = YoloLabelBridge.toRank(fakeObj(label = id))
     private fun fakeObj(label: Int, labelName: String? = null, prob: Float = 0.8f) =
-        com.example.qnjisuanqi.YoloAPI.Obj().also {
-            it.label = label; it.labelName = labelName; it.prob = prob
+        com.example.qnjisuanqi.YoloAPI.newObjForTests().apply {
+            this.label = label; this.labelName = labelName; this.prob = prob
         }
 }
