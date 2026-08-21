@@ -267,7 +267,7 @@ class FloatingWindowService : Service() {
     private fun updateStatusDots(b: FloatingPanelBinding, core: JiPaiQiApp.Core) {
         val authOk = Settings.canDrawOverlays(this)
         val frameOk = core.ready
-        val analyzeOk = core.pipeline != null && core.ready
+        val analyzeOk = (core.nativePipeline != null || core.pipeline != null) && core.ready
         b.recordAuthIndicator.setBackgroundResource(
             if (authOk) R.drawable.floating_record_indicator_dot_ok
             else R.drawable.floating_record_indicator_dot_err

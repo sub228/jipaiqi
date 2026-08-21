@@ -107,13 +107,15 @@ class NativeYoloPipeline(
         }
         val rows = clusters.map { it.finalize() }.sortedBy { it.yMean }
 
-        // ── Hand row = largest cluster with yMean >= 0.5h ───────────────
-        // minHandCards = 40% of expected hand (17 for 斗地主 3-player = 6).
-        // This matches the Dart heuristic: a row of 6+ cards on the lower
-        // half is definitely the user's hand, never an opponent play.
+        // ── Hand row = largest cluster with yMean >= 0.66h (screenAdaptions.json 66%) ──
+        // NOTE: wz.apk screenAdaptions.json defines handsArea.default = ["66%","max","max","max"],
+        // so a card's centre must sit in the BOTTOM 34% of the screen for it to be treated
+        // as a hand card.  The previous 0.50h threshold was therefore picking up the
+        // opponent count-box row and the mid-table play-area as the "hand" on high-dpi
+        // 2848x1320 Mate80  screens.  Reverting to the literal constant from the JSON.
         val minHandCards = (screen.expectedHandCards * 0.4f).toInt().coerceAtLeast(5)
         var handRow: Cluster? = rows
-            .filter { it.cards.size >= minHandCards && it.yMean >= h * 0.50f }
+            .filter { it.cards.size >= minHandCards && it.yMean >= h * screen.handRowTopPct }
             .maxWithOrNull(compareBy<Cluster> { it.cards.size }.thenBy { it.yMean })
 
         if (handRow == null) {
