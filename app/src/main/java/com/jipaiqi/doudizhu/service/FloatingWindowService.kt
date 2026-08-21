@@ -175,7 +175,7 @@ class FloatingWindowService : Service() {
         b.setting.setOnClickListener { toggle(b.showset) }
         b.setting.setOnLongClickListener {
             runCatching {
-                DLog.i(TAG, "⚙️ long-pressed: opening SettingsAndLogDialog (v2.1.9)")
+                DLog.i(TAG, "⚙️ long-pressed: opening SettingsAndLogDialog (v2.2.1)")
                 val dlg = SettingsAndLogDialog(this)
                 dlg.show()
                 true

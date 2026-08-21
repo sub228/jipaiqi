@@ -100,6 +100,20 @@ class ScreenCaptureService : Service() {
     // (B2) 保存 MediaProjection 授权结果，重拿 projection 用
     @Volatile private var savedProjectionResultCode: Int = -1
     @Volatile private var savedProjectionData: Intent? = null
+    // ── v2.2.1 修复 fmt=2 / acquireLatestImage=null 专用变量 ────────
+    // (C1) getRealMetrics 缓存：天然横屏机（如华为 2848x1320）每 100ms 触发
+    //      captureScreenMetrics → 每次都触发 swap → 每帧刷一条 W 日志。
+    //      用一对缓存变量做去重，只有真的发生切换时才打印。
+    @Volatile private var lastRawW: Int = -1
+    @Volatile private var lastRawH: Int = -1
+    // (C2) 格式回退：先用 PixelFormat.RGBX_8888(2) 尝试，若连续 500 帧全部 null
+    //      则自动切到 RGBA_8888(1) 重试一次（部分国产机 HAL 只认 RGBA_8888）。
+    @Volatile private var useFallbackFormat: Boolean = false
+    @Volatile private var triedFallbackFormat: Boolean = false
+    // (C3) ImageReader.OnImageAvailableListener（no-op）：
+    //      必须存在 listener，否则 MediaProjection producer 从不 enqueue buffer，
+    //      acquireLatestImage 永远返回 null（AOSP MediaProjectionService 行为）。
+    private val imageAvailListener = ImageReader.OnImageAvailableListener { /* no-op: 激活 surface 队列 */ }
 
     /** 斗地主固定为 MODE1 (wz.apk default) */
     enum class Mode { MODE1, MODE2, MODE3, MODE4 }
@@ -244,7 +258,7 @@ class ScreenCaptureService : Service() {
                 consecutiveNullFrames++
                 maybeLogCaptureDebug("acquireLatestImage=null",
                         "attempts=$totalAttempts null_rate=${totalNulls*100.0/max(1,totalAttempts)}%.1f " +
-                        "reader=${ir.width}x${ir.height}fmt=${ir.imageFormat} " +
+                        "reader=${ir.width}x${ir.height}${formatName(ir.imageFormat)} " +
                         "vd=${virtualDisplay != null}")
                 handleFrameStallIfNeeded()
                 return
@@ -315,9 +329,28 @@ class ScreenCaptureService : Service() {
         if (now2 - lastDebugLogMs < 5000L) return
         lastDebugLogMs = now2
 
+        // (C2) v2.2.1 格式自动回退：启动后从未拿过成功帧 (lastFrameOkMs==0)
+        //      且总尝试次数 >= 500（约 50 秒无图），切到 RGBA_8888(1) 重建一次。
+        if (lastFrameOkMs == 0L && totalAttempts >= 500L && !triedFallbackFormat && !useFallbackFormat) {
+            DLog.w(TAG, "[STALL:FORMAT_FALLBACK] totalAttempts=$totalAttempts success=0 RGBX_8888(2) → " +
+                    "switching to RGBA_8888(1) and forcing pipeline rebuild. " +
+                    "This only happens ONCE per capture session.")
+            useFallbackFormat = true
+            triedFallbackFormat = true
+            // 强制触发一次重建（忽略 throttle，因为 format 真的变了）
+            runCatching { virtualDisplay?.release() }; virtualDisplay = null
+            lastVirtualDisplayDensity = -1
+            runCatching { imageReader?.setOnImageAvailableListener(null, null); imageReader?.close() }
+            imageReader = null
+            consecutiveRecreateFails = 0
+            lastRecreateAttemptMs = 0L  // 清掉 throttle，让 tickFrame 下一轮立刻重建
+            return  // 下一轮 tickFrame 里 imageReader==null → recreate
+        }
+
         val irW = imageReader?.width ?: -1
         val irH = imageReader?.height ?: -1
         val irFmt = imageReader?.imageFormat ?: -1
+        val irFmtStr = formatName(irFmt)
         val irPlanesStr = runCatching {
             imageReader?.imageFormat?.let {
                 val ir = imageReader
@@ -326,7 +359,7 @@ class ScreenCaptureService : Service() {
                     "no-image-acquirable"
                 } else {
                     val ps = img.planes?.getOrNull(0)
-                    "img=${img.width}x${img.height}fmt=${img.format} " +
+                    "img=${img.width}x${img.height}fmt=${formatName(img.format)} " +
                             "plane[0].ps=${ps?.pixelStride} rs=${ps?.rowStride} " +
                             "bufSz=${ps?.buffer?.remaining()}"
                 }.also { runCatching { img?.close() } }
@@ -339,15 +372,20 @@ class ScreenCaptureService : Service() {
         DLog.w(TAG, "[STALL-CHECK] ${if (lastFrameOkMs == 0L) "no-successful-frame-yet (启动后)" else "stuck>5s  since_last_ok"}")
         DLog.w(TAG, "  ScreenMetrics w=$mScreenWidth h=$mScreenHeight dpi=$mScreenDensity " +
                 "portrait=${isPortrait()} expectedSz=${expectedCaptureSize().joinToString("x")}")
-        DLog.w(TAG, "  imageReader=$irW x $irH fmt=$irFmt (1=RGBX_8888) maxImages=5")
+        DLog.w(TAG, "  imageReader=$irW x $irH fmt=$irFmtStr (1=RGBA_8888, 2=RGBX_8888) maxImages=5")
         DLog.w(TAG, "  imageReader acquireLatestImage()  → $irPlanesStr")
         DLog.w(TAG, "  projection=${projection != null} vd=${virtualDisplay != null} " +
                 "vdDensity=$lastVirtualDisplayDensity vs screenDensity=$mScreenDensity")
         DLog.w(TAG, "  currentMode=$currentMode; extractNativeLibs=true ABI=arm64-v8a")
+        DLog.w(TAG, "  useFallbackFormat=$useFallbackFormat triedFallback=$triedFallbackFormat")
         DLog.w(TAG, "  NativeYoloReady=${core?.nativeYoloReady ?: false}")
         DLog.w(TAG, "  totalAttempts=$totalAttempts; nullImg=$totalNulls nullBmp=$totalBitmapNulls; " +
                 "nullImgRate=${"%.1f".format(totalNulls * 100.0 / max(1, totalAttempts))}%")
         DLog.w(TAG, "  detCnt=$sLastFrameDetections handCnt=$sLastFrameHandCount")
+        DLog.w(TAG, "  Suggested actions (in order):")
+        DLog.w(TAG, "    (a) listener 绑定状态: 看 log 上方有没有 '[CAPTURE:create_ir] setOnImageAvailableListener attached'")
+        DLog.w(TAG, "    (b) VirtualDisplay.display 对象: 看 [CAPTURE:create_vd] DONE 行里的 displayObj=true/false")
+        DLog.w(TAG, "    (c) If all checks pass, long-press floating gear → Log → copy and send to dev.")
         DLog.w(TAG, "═══════════════════════════════════════════════════════")
     }
 
@@ -389,6 +427,14 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun formatName(v: Int): String = when (v) {
+        1 -> "RGBA_8888(1)"
+        2 -> "RGBX_8888(2)"
+        3 -> "RGB_888(3)"
+        4 -> "RGB_565(4)"
+        else -> "UNKNOWN($v)"
+    }
+
     // ── FloatWindowActions literal methods ───────────────────────────
     private fun createImageReader(force: Boolean) {
         val size = expectedCaptureSize()
@@ -397,14 +443,31 @@ class ScreenCaptureService : Service() {
         val existing = imageReader
         if (existing != null && !force &&
             existing.width == w && existing.height == h) return
-        if (existing != null) runCatching { existing.close() }
+        if (existing != null) runCatching {
+            existing.setOnImageAvailableListener(null, null)
+            existing.close()
+        }
 
         val maxImages = if (currentMode == Mode.MODE2) 12 else 5
-        // format = 1 = PixelFormat.RGBX_8888 (wz.apk hard-coded literal)
+        // (C2) v2.2.1: format 选择 — 默认 RGBX_8888(2)，回退用 RGBA_8888(1)
+        val fmt = if (useFallbackFormat) PixelFormat.RGBA_8888 else PixelFormat.RGBX_8888
+        val fmtStr = formatName(fmt) + if (useFallbackFormat) " [FALLBACK]" else ""
         DLog.i(TAG, "[CAPTURE:create_ir] mode=$currentMode size=${w}x${h} " +
-                "format=RGBX_8888(1) maxImages=$maxImages force=$force " +
+                "format=$fmtStr maxImages=$maxImages force=$force " +
                 "screen=${mScreenWidth}x${mScreenHeight} portrait=${isPortrait()}")
-        imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBX_8888, maxImages)
+        imageReader = ImageReader.newInstance(w, h, fmt, maxImages)
+        // (C3) v2.2.1 关键修复：ImageReader 必须绑定 OnImageAvailableListener
+        //      （哪怕是 no-op），否则 MediaProjection producer 不 enqueue buffer，
+        //      acquireLatestImage 永远返回 null（AOSP MediaProjectionService 行为）。
+        val hdr = captureHandler
+        if (hdr != null) {
+            imageReader!!.setOnImageAvailableListener(imageAvailListener, hdr)
+            DLog.i(TAG, "[CAPTURE:create_ir] setOnImageAvailableListener attached (no-op) to " +
+                    "reader=${imageReader!!.width}x${imageReader!!.height}@${formatName(imageReader!!.imageFormat)}")
+        } else {
+            DLog.w(TAG, "[CAPTURE:create_ir] captureHandler=null — listener NOT attached, " +
+                    "frames will likely be ALL NULL (this is a BUG in capture start ordering).")
+        }
     }
 
     private fun virtualDisplay(): Boolean {
@@ -425,11 +488,27 @@ class ScreenCaptureService : Service() {
         // flags = 16 (VIRTUAL_DISPLAY_FLAG_PUBLIC)
         try {
             DLog.i(TAG, "[CAPTURE:create_vd] mode=$currentMode size=${size[0]}x${size[1]} density=$d flag=16")
-            virtualDisplay = p.createVirtualDisplay(
+            val vd = p.createVirtualDisplay(
                 "screen-mirror", size[0], size[1], d,
                 /* flags = */ 16, surface, null, null)
+            virtualDisplay = vd
             lastVirtualDisplayDensity = d
-            return virtualDisplay != null
+            // (C4) v2.2.1 深度校验：确认 Android 系统真的把虚拟屏幕挂起来了
+            //      — display==null 意味着 flag/size 被拒，surface 将永远收不到帧。
+            val disp = runCatching { vd?.display }.getOrNull()
+            val dispValid = disp != null
+            DLog.i(TAG, "[CAPTURE:create_vd] DONE vdCreated=${vd != null} displayObj=$dispValid " +
+                    "surface.isValid=${runCatching { surface.isValid }.getOrDefault(false)}")
+            if (vd == null) {
+                DLog.w(TAG, "[CAPTURE:create_vd] FAILED: createVirtualDisplay returned null (projection token invalid?)")
+                return false
+            }
+            if (!dispValid) {
+                DLog.w(TAG, "[CAPTURE:create_vd] WARNING: vd.display==null; " +
+                        "MediaProjection may have rejected size=${size[0]}x${size[1]}@$d flag=16. " +
+                        "If frames are ALL NULL, try restarting screen recording.")
+            }
+            return true
         } catch (t: Throwable) {
             DLog.e(TAG, "createVirtualDisplay failed", t)
             return false
@@ -657,6 +736,7 @@ class ScreenCaptureService : Service() {
     //                                   getMetrics W != getRealMetrics H（2710 vs 1320 的 bug 根因）
     // 原版 wz.apk FloatWindowLayoutHelper.captureAndStoreScreenMetrics 里本来就是
     //   getRealMetrics → w/h，只在 Activity.attachBaseContext 不同时用 getMetrics 兜底。
+    // v2.2.1 (C1): 新增 lastRawW/lastRawH 去重缓存，天然横屏机不再每 100ms 刷 W 日志。
     private fun captureScreenMetrics() {
         val wm = applicationContext.getSystemService(Context.WINDOW_SERVICE)
                 as? android.view.WindowManager
@@ -669,24 +749,36 @@ class ScreenCaptureService : Service() {
                     .invoke(wm.defaultDisplay, real)
             }.isSuccess
         } else false
+        val rawW: Int
+        val rawH: Int
+        val rawDpi: Int
         if (gotReal && real.widthPixels > 0 && real.heightPixels > 0) {
-            // (B3) getRealMetrics 一次给出真实 W/H + density，
-            //      portrait = height > width（与 orientation 传感器无关，只用尺寸）
-            mScreenWidth  = real.widthPixels
-            mScreenHeight = real.heightPixels
-            mScreenDensity = real.densityDpi
+            rawW = real.widthPixels
+            rawH = real.heightPixels
+            rawDpi = real.densityDpi
         } else {
-            mScreenWidth  = fallbackDm.widthPixels
-            mScreenHeight = fallbackDm.heightPixels
-            mScreenDensity = fallbackDm.densityDpi
+            rawW = fallbackDm.widthPixels
+            rawH = fallbackDm.heightPixels
+            rawDpi = fallbackDm.densityDpi
         }
+        mScreenWidth  = rawW
+        mScreenHeight = rawH
+        mScreenDensity = rawDpi
         if (mScreenWidth > mScreenHeight) {
             // (B3) 强校验：斗地主始终是竖屏，一旦 getRealMetrics 给了横屏值，说明
             // Display API 在某些机型上受窗口 manager 影响 — 直接交换。
-            // 你在用户截图里永远是竖牌 17 张排一行，所以 H 必须 > W。
             val t = mScreenWidth; mScreenWidth = mScreenHeight; mScreenHeight = t
-            DLog.w(TAG, "[SCREEN] getRealMetrics returned landscape W>H(${mScreenHeight}x${mScreenWidth}); " +
-                    "auto-swapped back to portrait ${mScreenWidth}x${mScreenHeight}")
+            // (C1) v2.2.1：只有 raw 值发生变化时才打印一次日志，天然横屏机每帧不再刷屏
+            if (rawW != lastRawW || rawH != lastRawH) {
+                DLog.w(TAG, "[SCREEN] getRealMetrics returned landscape W>H(${rawW}x${rawH}); " +
+                        "auto-swapped to portrait ${mScreenWidth}x${mScreenHeight}")
+                lastRawW = rawW; lastRawH = rawH
+            }
+        } else {
+            // 清除缓存 — 方向真的变了，下次切换时重新打日志
+            if (lastRawW != rawW || lastRawH != rawH) {
+                lastRawW = rawW; lastRawH = rawH
+            }
         }
     }
 
@@ -704,13 +796,13 @@ class ScreenCaptureService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(NotificationChannel(
-                CHANNEL_ID, "记牌器(v2.1.7 原版NCNN管线)",
+                CHANNEL_ID, "记牌器(v2.2.1 原版NCNN管线+listener修复)",
                 NotificationManager.IMPORTANCE_LOW
             ))
         }
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("记牌器 AI 运行中")
-            .setContentText("原版 wz.apk NCNN YOLOv8：RGBX_8888 + flag=16 + loadModel(0,0,6) + obtainExactRgbaBuffer")
+            .setContentText("wz.apk NCNN: setOnImageAvailableListener+RGBX8888→RGBA fallback+flag16")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()
