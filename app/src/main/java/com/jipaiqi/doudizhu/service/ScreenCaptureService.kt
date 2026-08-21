@@ -106,11 +106,12 @@ class ScreenCaptureService : Service() {
     //      用一对缓存变量做去重，只有真的发生切换时才打印。
     @Volatile private var lastRawW: Int = -1
     @Volatile private var lastRawH: Int = -1
-    // (C2) 格式回退：先用 PixelFormat.RGBX_8888(2) 尝试，若连续 500 帧全部 null
-    //      则自动切到 RGBA_8888(1) 重试一次（部分国产机 HAL 只认 RGBA_8888）。
+    // (C2 v2.2.3) 格式回退 — 原版 wz.apk FloatWindowActions.java L68 明确用 format=1 (RGBA_8888),
+    //      所以我们也**默认 RGBA_8888(1)**；若连续 500 帧全部 null 再切到 RGBX_8888(2)（少数老机器）。
+    //      之前版本错误地默认 RGBX_8888(2) 是华为 Mate80 Pro Max 等机型 100% null 的根因。
     @Volatile private var useFallbackFormat: Boolean = false
     @Volatile private var triedFallbackFormat: Boolean = false
-    // (C2b v2.2.2) 二级回退：RGBA_8888(1) 也失败满 500 帧 → 切 VD flag=16 为 0。
+    // (C2b v2.2.2) 二级回退：RGBA 切到 RGBX 后仍失败满 500 帧 (attempts>=1000) → 切 VD flag=16→0。
     //       华为/荣耀部分机型 (Kirin 9010 + MagicOS 8+) 对 VIRTUAL_DISPLAY_FLAG_PUBLIC(16)
     //       有静默限制（VD 看似创建成功 displayObj=true 实际 Surface 不推进）。
     @Volatile private var useFallbackFlag: Boolean = false
@@ -342,14 +343,13 @@ class ScreenCaptureService : Service() {
         val now = System.currentTimeMillis()
         if (lastFrameOkMs > 0 && now - lastFrameOkMs < 5000L) return
 
-        // (C2) v2.2.2 格式自动回退：启动后从未拿过成功帧 (lastFrameOkMs==0)
-        //      且总尝试次数 >= 500（约 50 秒无图），切到 RGBA_8888(1) 重建一次。
-        //   重点：这个判断必须放在节流前面，否则 lastDebugLogMs 被 maybeLogCaptureDebug
-        //   每 1s 刷新一次 → 5s 节流永远不满足 → fallback 永远不触发。
+        // (C2 v2.2.3) 格式自动回退：原版默认用 RGBA_8888(1)，启动后从未拿过成功帧
+        //      (lastFrameOkMs==0) 且总尝试次数 >= 500 → 切备用 RGBX_8888(2) 重建一次。
+        //      判断放在节流前面，防止 maybeLogCaptureDebug 每 1s 刷新导致 5s 节流永远不满足。
         if (lastFrameOkMs == 0L && totalAttempts >= 500L && !triedFallbackFormat && !useFallbackFormat) {
-            DLog.w(TAG, "[STALL:FORMAT_FALLBACK] totalAttempts=$totalAttempts success=0 RGBX_8888(2) → " +
-                    "switching to RGBA_8888(1) and forcing pipeline rebuild. " +
-                    "This only happens ONCE per capture session.")
+            DLog.w(TAG, "[STALL:FORMAT_FALLBACK] totalAttempts=$totalAttempts success=0 " +
+                    "RGBA_8888(1) [ORIGINAL default] → switching to RGBX_8888(2). " +
+                    "Rebuilding pipeline (tier 1/3).")
             useFallbackFormat = true
             triedFallbackFormat = true
             // 强制触发一次重建（忽略 throttle，因为 format 真的变了）
@@ -363,11 +363,11 @@ class ScreenCaptureService : Service() {
             return  // 下一轮 tickFrame 里 imageReader==null → recreate
         }
 
-        // (C2b v2.2.2) 二级回退 — flag: 已切 RGBA_8888 + 再 500 帧 (attempts>=1000)
+        // (C2b v2.2.2) 二级回退 — flag: 已切 RGBX_8888 + 再 500 帧 (attempts>=1000)
         //       仍全部 null → 切 VIRTUAL_DISPLAY_FLAG_PUBLIC(16) → 默认 flag=0
         if (lastFrameOkMs == 0L && useFallbackFormat && totalAttempts >= 1000L &&
             !triedFallbackFlag && !useFallbackFlag) {
-            DLog.w(TAG, "[STALL:FLAG_FALLBACK] totalAttempts=$totalAttempts RGBA worked 0 frames; " +
+            DLog.w(TAG, "[STALL:FLAG_FALLBACK] totalAttempts=$totalAttempts RGBX_8888 fallback still 0 frames; " +
                     "VD flag=16(PUBLIC) → 0(DEFAULT). forcing rebuild (tier 2/3).")
             useFallbackFlag = true
             triedFallbackFlag = true
@@ -381,12 +381,12 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        // (C2c v2.2.2) 三级回退 — size no-swap: flag=0 也失败满 500 帧 (attempts>=1500)
+        // (C2c v2.2.2) 三级回退 — size no-swap: flag=0+RGBX 也失败满 500 帧 (attempts>=1500)
         //       → 去掉 MODE1 的 W↔H 交换，让 ImageReader/VD 都按屏幕肖像尺寸 (W×H 不swap)
         //       创建，绕过 HWC composer 在天然横屏手机上的 aspect-ratio 内部限制。
         if (lastFrameOkMs == 0L && useFallbackFlag && totalAttempts >= 1500L &&
             !triedFallbackSizeNoSwap && !useFallbackSizeNoSwap) {
-            DLog.w(TAG, "[STALL:SIZE_NOSWAP_FALLBACK] totalAttempts=$totalAttempts flag=0+RGBA " +
+            DLog.w(TAG, "[STALL:SIZE_NOSWAP_FALLBACK] totalAttempts=$totalAttempts flag=0+RGBX_FALLBACK " +
                     "still 0 frames; dropping MODE1 W↔H swap (reader W×H=screen W×H portrait) " +
                     "forcing rebuild (tier 3/3). LAST fallback — if this also fails, please " +
                     "restart 记牌器 → 重新授权录屏 and/or 关闭华为 智能分辨率。")
@@ -511,9 +511,10 @@ class ScreenCaptureService : Service() {
         }
 
         val maxImages = if (currentMode == Mode.MODE2) 12 else 5
-        // (C2) v2.2.1: format 选择 — 默认 RGBX_8888(2)，回退用 RGBA_8888(1)
-        val fmt = if (useFallbackFormat) PixelFormat.RGBA_8888 else PixelFormat.RGBX_8888
-        val fmtStr = formatName(fmt) + if (useFallbackFormat) " [FALLBACK]" else ""
+        // (C2 v2.2.3) format — 原版 wz.apk 明确使用 PixelFormat.RGBA_8888(1) (FloatWindowActions.java L68).
+        //              fallback 500 帧后才切到 RGBX_8888(2) 备用。
+        val fmt = if (useFallbackFormat) PixelFormat.RGBX_8888 else PixelFormat.RGBA_8888
+        val fmtStr = formatName(fmt) + if (useFallbackFormat) " [FALLBACK from RGBA→RGBX]" else " [ORIGINAL default]"
         DLog.i(TAG, "[CAPTURE:create_ir] mode=$currentMode size=${w}x${h} " +
                 "format=$fmtStr maxImages=$maxImages force=$force " +
                 "screen=${mScreenWidth}x${mScreenHeight} portrait=${isPortrait()}")
@@ -862,13 +863,13 @@ class ScreenCaptureService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(NotificationChannel(
-                CHANNEL_ID, "记牌器(v2.2.2 原版NCNN+3级回退)",
+                CHANNEL_ID, "记牌器(v2.2.3 原版NCNN+3级回退)",
                 NotificationManager.IMPORTANCE_LOW
             ))
         }
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("记牌器 AI 运行中")
-            .setContentText("v2.2.2 NCNN管线: 3级回退(RGBX→RGBA, flag16→0, W↔H noswap)")
+            .setContentText("v2.2.3 NCNN管线: 3级回退(RGBX→RGBA, flag16→0, W↔H noswap) + XML默认记牌条可见")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()

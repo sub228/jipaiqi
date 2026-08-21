@@ -104,7 +104,7 @@ class SettingsAndLogDialog(context: Context) : Dialog(context) {
 
         // ── 标题行 ──
         val title = TextView(ctx).apply {
-            text = "⚙️ 设置 & 调试日志  (v2.2.2)"
+            text = "⚙️ 设置 & 调试日志  (v2.2.3)"
             setTextColor(0xFF_F2_F2_F2.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             setPadding(0, 0, 0, pad)
@@ -344,7 +344,7 @@ class SettingsAndLogDialog(context: Context) : Dialog(context) {
                 val text = DebugLogCollector.snapshotString(
                     newestFirst = false,
                     limit = 2000,
-                    header = "[jipaiqi v2.2.2 APP内置调试日志 — ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
+                    header = "[jipaiqi v2.2.3 APP内置调试日志 — ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
                         java.util.Locale.US).format(java.util.Date())}]"
                 )
                 val scv = tv.parent as? ScrollView

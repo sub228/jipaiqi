@@ -120,7 +120,11 @@ class FloatingWindowService : Service() {
         applyToggleStates(b)
     }
 
-    /** Inflate the 15 rank cells (3..2, BJ, RJ) into the numList container. */
+    /** Inflate the 15 rank cells (3..2, BJ, RJ) into the numList container.
+     * (v2.2.3) Immediately render each cell with the deck's full starting count,
+     *          so the rank strip is meaningful the instant the floating window
+     *          appears (matches original APK behaviour). Refresh() will later
+     *          decrement these as my-hand / played-pile cards are detected. */
     private fun inflateRankCells(b: FloatingPanelBinding) {
         val inflater = LayoutInflater.from(this)
         b.numList.removeAllViews()
@@ -130,7 +134,9 @@ class FloatingWindowService : Service() {
             val label = cell.findViewById<TextView>(R.id.rankLabel)
             val count = cell.findViewById<TextView>(R.id.countText)
             label.text = Card.label(rank)
-            count.text = "—"
+            val total = Card.TOTAL[rank] ?: 4
+            count.text = total.toString()
+            count.setTextColor(getColor(R.color.text_primary))
             b.numList.addView(cell)
             cells[rank] = CellViews(cell, label, count)
         }
@@ -175,7 +181,7 @@ class FloatingWindowService : Service() {
         b.setting.setOnClickListener { toggle(b.showset) }
         b.setting.setOnLongClickListener {
             runCatching {
-                DLog.i(TAG, "⚙️ long-pressed: opening SettingsAndLogDialog (v2.2.2)")
+                DLog.i(TAG, "⚙️ long-pressed: opening SettingsAndLogDialog (v2.2.3)")
                 val dlg = SettingsAndLogDialog(this)
                 dlg.show()
                 true
