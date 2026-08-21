@@ -38,12 +38,17 @@ import kotlin.math.abs
  *
  *   - 15 cells, one per rank, with the remaining count outside my hand
  *   - "断张" highlight when a rank is exhausted (count == 0)
- *   - Opponents' remaining card counts ( landlord=20 - played, farmer=17 - played )
- *   - One-line DouZero AI suggestion (e.g. "AI: K K K (3)")
+ *   - Opponents' remaining card counts
+ *   - One-line DouZero AI suggestion
  *
- * The user can drag the panel anywhere on screen. The close button stops
- * the floating service (but leaves the ScreenCaptureService running until
- * the user explicitly stops it from the main UI).
+ * UI features:
+ *   - Compact panel (small cells, tight padding) to avoid blocking the card area.
+ *   - Minimize button (▾/▲) collapses everything to a single small badge
+ *     showing just the AI suggestion summary.
+ *   - Drag anywhere on the panel to reposition it.
+ *   - Default position: top-right corner, away from the card play area.
+ *
+ * The close button stops the floating service.
  */
 class FloatingWindowService : Service() {
 
@@ -52,6 +57,9 @@ class FloatingWindowService : Service() {
     private var windowManager: WindowManager? = null
     private var rootView: View? = null
     private var binding: FloatingPanelBinding? = null
+    private var layoutParams: WindowManager.LayoutParams? = null
+    private var minimized = false
+    private var lastAiSummary = "AI：等待…"
 
     private val updateTask = object : Runnable {
         override fun run() { refresh(); mainHandler.postDelayed(this, REFRESH_MS) }
@@ -80,16 +88,20 @@ class FloatingWindowService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 24
-            y = 240
+            // Default: top-right corner to stay away from:
+            //   - the "my hand" region (bottom)
+            //   - the table play region (center/middle)
+            gravity = Gravity.TOP or Gravity.END
+            x = 12
+            y = 180
         }
+        layoutParams = params
 
         val b = FloatingPanelBinding.inflate(LayoutInflater.from(this))
         binding = b
         rootView = b.root
 
-        // Drag handle (touch + drag anywhere on the panel except the close button).
+        // Drag handle: drag anywhere (we consume when NOT on a clickable child).
         var startX = 0; var startY = 0
         var startRawX = 0f; var startRawY = 0f
         var dragging = false
@@ -107,14 +119,42 @@ class FloatingWindowService : Service() {
                         dragging = true
                         params.x = (startX + dx).toInt()
                         params.y = (startY + dy).toInt()
-                        windowManager?.updateViewLayout(b.root, params)
+                        runCatching { windowManager?.updateViewLayout(b.root, params) }
                     }
                 }
             }
+            // Don't consume if user is tapping a button (let click fire).
             false
         }
+
+        // Close button.
         b.closeBtn.setOnClickListener { stopSelf() }
+
+        // Minimize / expand toggle.
+        b.minimizeBtn.setOnClickListener {
+            minimized = !minimized
+            applyMinimizedState()
+        }
+
         windowManager?.addView(b.root, params)
+    }
+
+    private fun applyMinimizedState() {
+        val b = binding ?: return
+        if (minimized) {
+            // Collapsed: hide content group, show AI summary in the title
+            b.contentGroup.visibility = View.GONE
+            b.minimizeBtn.text = "▲"
+            // Use the role text area as the summary line.
+            b.roleText.text = lastAiSummary
+            b.roleText.setTextSize(9f)  // slightly bigger in badge mode
+        } else {
+            // Expanded: show everything
+            b.contentGroup.visibility = View.VISIBLE
+            b.minimizeBtn.text = "▾"
+            // Refresh the correct role text next cycle (refresh() sets it).
+            refresh()
+        }
     }
 
     /** Refresh the displayed counts + AI line from [JiPaiQiApp.Core]. */
@@ -123,12 +163,13 @@ class FloatingWindowService : Service() {
         val core = (application as JiPaiQiApp).core
         val snapshot = runCatching { core.state.toInfoSet() }.getOrNull() ?: return
 
-        // Update role text.
-        b.roleText.text = "— " + when (snapshot.playerPosition) {
+        // Update role text (in expanded mode).
+        val roleLabel = "— " + when (snapshot.playerPosition) {
             Position.LANDLORD -> "地主"
             Position.LANDLORD_UP -> "农民(上)"
             Position.LANDLORD_DOWN -> "农民(下)"
         }
+        if (!minimized) b.roleText.text = roleLabel
 
         // Update rank grid: remaining = total - myHand - played_all.
         val myHand = snapshot.playerHandCards.toSet()
@@ -146,10 +187,11 @@ class FloatingWindowService : Service() {
             )
         }
 
-        // Opponents line.
+        // Opponents line (expanded mode only — already handled in summary when minimized).
         val left = snapshot.numCardsLeft
-        b.opponentsLine.text = "对手剩：${left[Position.LANDLORD_UP]} / ${left[Position.LANDLORD_DOWN]}" +
-            if (snapshot.playerPosition == Position.LANDLORD) "" else " / 地:${left[Position.LANDLORD]}"
+        val oppLine = "对手剩：${left[Position.LANDLORD_UP]} / ${left[Position.LANDLORD_DOWN]}" +
+            if (snapshot.playerPosition == Position.LANDLORD) "" else " · 地:${left[Position.LANDLORD]}"
+        if (!minimized) b.opponentsLine.text = oppLine
 
         // AI recommendation (off-main thread, then update text).
         scope.launch {
@@ -162,19 +204,28 @@ class FloatingWindowService : Service() {
                 Log.w(TAG, "AI recommend failed: ${e.message}"); null
             }
             val line = rec?.let { formatRec(it) } ?: "AI：等待识别手牌…"
-            mainHandler.post { b.aiLine.text = line }
+            lastAiSummary = line
+            mainHandler.post {
+                if (minimized) {
+                    // Show AI summary in the badge (role text position).
+                    b.roleText.text = line
+                } else {
+                    b.aiLine.text = line
+                }
+            }
         }
     }
 
     private fun formatRec(rec: DouZeroEngine.Recommendation): String {
-        if (rec.action.isEmpty()) return "AI：过 (pass)"
-        val label = rec.action.joinToString(" ") { Card.label(it) }
+        if (rec.action.isEmpty()) return "AI：过"
+        val label = rec.action.joinToString("") { Card.label(it) }
         val src = when (rec.source) {
             DouZeroEngine.Source.MODEL -> "AI"
             DouZeroEngine.Source.HEURISTIC -> "启发"
             DouZeroEngine.Source.PASS -> "过"
         }
-        return "$src：$label"
+        val n = rec.action.size
+        return "$src：$label(${n}张)"
     }
 
     private fun cellForRank(b: FloatingPanelBinding, rank: Int): CellViews? {

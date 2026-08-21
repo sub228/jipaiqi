@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Floating window content. Displayed inside the WindowManager view.
-    Layout is intentionally compact: a 3-row grid (3..K, A/2, Jokers) plus
-    a small "AI 推荐" line that shows the DouZero-suggested play.
+    Compact layout to minimize screen footprint and avoid blocking card recognition:
+      - Header (title, role, minimize, close)
+      - 3 rows of rank cells (5 + 5 + 5 = 15 ranks)
+      - Opponents count line
+      - AI recommendation line
+
+    The minimize button (▼/▲) collapses the entire panel to a single badge.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
@@ -10,8 +15,10 @@
     android:layout_height="wrap_content"
     android:orientation="vertical"
     android:background="@drawable/floating_bg"
-    android:padding="8dp">
+    android:padding="4dp"
+    android:clipToPadding="false">
 
+    <!-- Header row: title, role, minimize, close -->
     <LinearLayout
         android:id="@+id/headerRow"
         android:layout_width="wrap_content"
@@ -25,7 +32,7 @@
             android:layout_height="wrap_content"
             android:text="记牌器"
             android:textColor="@color/brand_accent"
-            android:textSize="11sp"
+            android:textSize="9sp"
             android:textStyle="bold"
             tools:ignore="HardcodedText" />
 
@@ -33,10 +40,10 @@
             android:id="@+id/roleText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="6dp"
+            android:layout_marginStart="4dp"
             android:text="— 地主"
             android:textColor="@color/text_primary"
-            android:textSize="11sp"
+            android:textSize="8sp"
             tools:ignore="HardcodedText" />
 
         <View
@@ -44,70 +51,99 @@
             android:layout_height="0dp"
             android:layout_weight="1" />
 
+        <!-- Minimize / expand toggle -->
+        <TextView
+            android:id="@+id/minimizeBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="3dp"
+            android:paddingVertical="1dp"
+            android:text="▾"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            tools:ignore="HardcodedText" />
+
         <TextView
             android:id="@+id/closeBtn"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:padding="2dp"
+            android:paddingHorizontal="2dp"
+            android:paddingVertical="1dp"
             android:text="✕"
             android:textColor="@color/text_secondary"
-            android:textSize="13sp"
+            android:textSize="10sp"
             tools:ignore="HardcodedText" />
     </LinearLayout>
 
+    <!-- Collapsible content: all cells + opponents + AI -->
     <LinearLayout
-        android:id="@+id/rankRow1"
+        android:id="@+id/contentGroup"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:layout_marginTop="2dp">
+        android:orientation="vertical"
+        android:visibility="visible">
 
-        <include layout="@layout/floating_cell" android:id="@+id/cell_3" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_4" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_5" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_6" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_7" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_8" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_9" />
+        <!-- Row 1: 3, 4, 5, 6, 7, 8, 9, 10 (8 cells) -->
+        <LinearLayout
+            android:id="@+id/rankRow1"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="1dp">
+
+            <include layout="@layout/floating_cell" android:id="@+id/cell_3" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_4" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_5" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_6" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_7" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_8" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_9" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_10" />
+        </LinearLayout>
+
+        <!-- Row 2: J, Q, K, A, 2, BJ, RJ (7 cells, 3 cols spacer empty) -->
+        <LinearLayout
+            android:id="@+id/rankRow2"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="1dp">
+
+            <include layout="@layout/floating_cell" android:id="@+id/cell_J" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_Q" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_K" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_A" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_2" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_BJ" />
+            <include layout="@layout/floating_cell" android:id="@+id/cell_RJ" />
+        </LinearLayout>
+
+        <!-- Opponents count -->
+        <TextView
+            android:id="@+id/opponentsLine"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="对手剩：— / —"
+            android:textColor="@color/text_secondary"
+            android:textSize="7sp"
+            tools:ignore="HardcodedText" />
+
+        <!-- AI recommendation (max 2 lines, ellipsize for overflow) -->
+        <TextView
+            android:id="@+id/aiLine"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:fontFamily="monospace"
+            android:text="AI：等待…"
+            android:textColor="@color/brand_accent"
+            android:textSize="8sp"
+            android:maxEms="22"
+            android:maxLines="2"
+            android:ellipsize="end"
+            tools:ignore="HardcodedText" />
+
     </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rankRow2"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
-
-        <include layout="@layout/floating_cell" android:id="@+id/cell_10" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_J" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_Q" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_K" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_A" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_2" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_BJ" />
-        <include layout="@layout/floating_cell" android:id="@+id/cell_RJ" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/opponentsLine"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="对手剩：— / —"
-        android:textColor="@color/text_secondary"
-        android:textSize="10sp"
-        tools:ignore="HardcodedText" />
-
-    <TextView
-        android:id="@+id/aiLine"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:fontFamily="monospace"
-        android:text="AI：等待识别手牌…"
-        android:textColor="@color/brand_accent"
-        android:textSize="11sp"
-        android:maxEms="22"
-        android:maxLines="2"
-        tools:ignore="HardcodedText" />
 
 </LinearLayout>

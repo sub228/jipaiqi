@@ -3,21 +3,23 @@
     A single cell in the floating card counter grid:
       - rank label (3..2, BJ, RJ)
       - remaining count
+    Compact size for minimal screen footprint.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="28dp"
+    android:layout_width="20dp"
     android:layout_height="wrap_content"
     android:orientation="vertical"
     android:gravity="center"
     android:background="@drawable/floating_cell_bg"
-    android:padding="2dp"
-    android:layout_marginEnd="2dp">
+    android:paddingHorizontal="1dp"
+    android:paddingVertical="1dp"
+    android:layout_marginEnd="1dp">
 
     <TextView
         android:id="@+id/rankLabel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:textSize="10sp"
+        android:textSize="7sp"
         android:textColor="@color/text_primary"
         android:textStyle="bold" />
 
@@ -25,7 +27,9 @@
         android:id="@+id/countText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:textSize="11sp"
+        android:textSize="8sp"
         android:textColor="@color/brand_accent"
-        android:fontFamily="monospace" />
+        android:fontFamily="monospace"
+        android:includeFontPadding="false"
+        android:lineSpacingExtra="-2dp" />
 </LinearLayout>
