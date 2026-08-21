@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">记牌器 AI</string>
+    <string name="accessibility_service_label">记牌器 AI 辅助服务</string>
+    <string name="accessibility_service_description">可选：在屏幕识别不可靠时，通过无障碍服务读取斗地主对局的角色（地主/农民）与剩余手牌信息。默认关闭，需手动开启。</string>
+
+    <string name="permission_overlay_title">需要悬浮窗权限</string>
+    <string name="permission_overlay_msg">记牌器需要在屏幕上悬浮显示剩余牌和 AI 建议，请允许“显示在其他应用上层”权限后重试。</string>
+    <string name="permission_capture_title">需要屏幕录制权限</string>
+    <string name="permission_capture_msg">记牌器通过屏幕截图识别牌面，请允许屏幕录制权限。</string>
+
+    <string name="start">开始记牌</string>
+    <string name="stop">停止</string>
+    <string name="status_idle">未运行</string>
+    <string name="status_running">识别中…</string>
+    <string name="overlay_hint">点击悬浮窗拖动位置，长按可关闭</string>
+    <string name="no_models_title">缺少模型文件</string>
+    <string name="no_models_msg">未在 assets/models 中找到 DouZero / YOLO 的 ONNX 模型，AI 推荐功能将被禁用，仅基础记牌器可用。请运行 tools 下的转换脚本生成模型并重新打包。</string>
+    <string name="settings_role_landlord">我是地主</string>
+    <string name="settings_role_farmer_up">农民（地主上家）</string>
+    <string name="settings_role_farmer_down">农民（地主下家）</string>
+    <string name="settings_game_region_hint">请按屏幕游戏界面，框选手牌区/出牌区，或保持默认（自动按主流分辨率估算）。</string>
+</resources>

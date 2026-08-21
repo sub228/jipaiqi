@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Floating window content. Displayed inside the WindowManager view.
+    Layout is intentionally compact: a 3-row grid (3..K, A/2, Jokers) plus
+    a small "AI 推荐" line that shows the DouZero-suggested play.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/floating_bg"
+    android:padding="8dp">
+
+    <LinearLayout
+        android:id="@+id/headerRow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/titleText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="记牌器"
+            android:textColor="@color/brand_accent"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            tools:ignore="HardcodedText" />
+
+        <TextView
+            android:id="@+id/roleText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:text="— 地主"
+            android:textColor="@color/text_primary"
+            android:textSize="11sp"
+            tools:ignore="HardcodedText" />
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:id="@+id/closeBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="2dp"
+            android:text="✕"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            tools:ignore="HardcodedText" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rankRow1"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="2dp">
+
+        <include layout="@layout/floating_cell" android:id="@+id/cell_3" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_4" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_5" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_6" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_7" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_8" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_9" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rankRow2"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <include layout="@layout/floating_cell" android:id="@+id/cell_10" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_J" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_Q" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_K" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_A" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_2" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_BJ" />
+        <include layout="@layout/floating_cell" android:id="@+id/cell_RJ" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/opponentsLine"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="对手剩：— / —"
+        android:textColor="@color/text_secondary"
+        android:textSize="10sp"
+        tools:ignore="HardcodedText" />
+
+    <TextView
+        android:id="@+id/aiLine"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:fontFamily="monospace"
+        android:text="AI：等待识别手牌…"
+        android:textColor="@color/brand_accent"
+        android:textSize="11sp"
+        android:maxEms="22"
+        android:maxLines="2"
+        tools:ignore="HardcodedText" />
+
+</LinearLayout>

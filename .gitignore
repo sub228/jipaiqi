@@ -1,0 +1,40 @@
+# Built application files
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Build dirs
+/build/
+/app/build/
+/.gradle/
+/local.properties
+
+# IDE
+/.idea/
+*.iml
+.DS_Store
+.cxx/
+
+# Native build artifacts
+*.so.bak
+
+# Models: large binary weights are not committed.
+# Run `tools/convert_douzero_to_onnx.py` and `tools/convert_yolo_to_onnx.py` to regenerate them.
+/app/src/main/assets/models/*.onnx
+/app/src/main/assets/models/*.tflite
+/app/src/main/assets/models/*.pt
+/app/src/main/assets/models/*.ckpt
+/tools/_downloads/
+/tools/_output/
+
+# Python
+__pycache__/
+*.pyc
+/venv/
+/.venv/
+
+# Secrets
+*.keystore
+*.jks
+secrets.properties

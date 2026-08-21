@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Screen capture -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.MEDIA_PROJECTION" />
+
+    <!-- Floating window over other apps -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Keep CPU awake while a recognition session is running -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Optional: read interface nodes via AccessibilityService (kept off by default). -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Vibrate to notify user of an AI suggestion / "no more 2s" alert -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application
+        android:name=".JiPaiQiApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.JiPaiQi"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.JiPaiQi">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Screen capture + recognition pipeline. Runs as a foreground service
+             with mediaProjection type so the OS keeps it alive while the user
+             has authorized screen capture. -->
+        <service
+            android:name=".service.ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Floating window that overlays the running card game and shows
+             remaining card counts + the DouZero AI suggestion. -->
+        <service
+            android:name=".service.FloatingWindowService"
+            android:exported="false" />
+
+        <!-- Optional accessibility service. Disabled by the user until they
+             explicitly turn it on from the in-app settings. Used to read the
+             "I am the landlord / farmer" status from the host game UI when
+             screen recognition alone is unreliable. -->
+        <service
+            android:name=".service.GameAccessibilityService"
+            android:exported="false"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+    </application>
+</manifest>
