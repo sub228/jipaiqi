@@ -190,17 +190,13 @@ class FloatingWindowService : Service() {
         // Opponents line (expanded mode only — already handled in summary when minimized).
         val left = snapshot.numCardsLeft
         val mySize = snapshot.playerHandCards.size
-        val meLabel = when (snapshot.playerPosition) {
-            Position.LANDLORD -> "地主我"
-            Position.LANDLORD_UP -> "上(我)"
-            Position.LANDLORD_DOWN -> "下(我)"
-        }
+        val myHandStr = snapshot.playerHandCards.take(20).joinToString("") { Card.label(it) }
         val oppLine = if (snapshot.playerPosition == Position.LANDLORD) {
-            "我${mySize}·上${left[Position.LANDLORD_UP]} / 下${left[Position.LANDLORD_DOWN]}"
+            "我${mySize}·上${left[Position.LANDLORD_UP]} / 下${left[Position.LANDLORD_DOWN]}  手:$myHandStr"
         } else {
             val otherFarmer = if (snapshot.playerPosition == Position.LANDLORD_UP)
                 Position.LANDLORD_DOWN else Position.LANDLORD_UP
-            "${meLabel}${mySize}·地${left[Position.LANDLORD]} / 农${left[otherFarmer]}"
+            "我${mySize}·地${left[Position.LANDLORD]} / 农${left[otherFarmer]}  手:$myHandStr"
         }
         if (!minimized) b.opponentsLine.text = oppLine
 

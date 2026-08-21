@@ -287,7 +287,7 @@ class CardDetector private constructor(
             context: Context,
             inputSize: Int = 640,
             classToRank: Map<Int, Int> = DEFAULT_CLASS_TO_RANK,
-            confThreshold: Float = 0.30f,
+            confThreshold: Float = 0.25f,
             iouThreshold: Float = 0.5f,
         ): CardDetector? {
             val env = OrtEnvironment.getEnvironment()

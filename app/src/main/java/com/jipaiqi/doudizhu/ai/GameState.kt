@@ -124,7 +124,9 @@ class GameState {
      */
     fun recordPlay(position: Position, cards: List<Int>): Boolean = lock.withLock {
         if (cards.isEmpty()) return false
-        val sorted = cards.distinct().sorted()
+        // Keep duplicates — pairs/triplets/bombs have multiple copies of the
+        // same rank and we must NOT dedup them.
+        val sorted = cards.sorted()
 
         // Dedup: same position plays the same cards twice.
         val sig = "${position}:${sorted.joinToString(",")}"
