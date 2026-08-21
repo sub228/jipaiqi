@@ -52,7 +52,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="我的角色"
+                android:text="我的角色（默认自动识别，按手牌张数判断：17=农民 / 20=地主）"
                 android:textColor="@color/text_secondary"
                 android:textSize="12sp" />
 
@@ -62,7 +62,17 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 app:singleSelection="true"
-                app:selectionRequired="true">
+                app:selectionRequired="false">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/roleAuto"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:checked="true"
+                    android:text="自动"
+                    android:textSize="12sp" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/roleLandlord"

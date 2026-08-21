@@ -50,6 +50,10 @@ class GameState {
     @Volatile var myPosition: Position = Position.LANDLORD
         private set
 
+    /** If true, [setMyPosition] was called explicitly (UI button) and we
+     *  should NOT overwrite it from setMyHand's auto-detect heuristic. */
+    @Volatile var positionExplicitlySet: Boolean = false
+
     /** Cards currently in my hand (most recent successful recognition). */
     @Volatile private var myHand: List<Int> = emptyList()
 
@@ -81,28 +85,32 @@ class GameState {
 
     // ---- Mutators ------------------------------------------------------
 
-    fun setMyPosition(p: Position) = lock.withLock { myPosition = p }
+    fun setMyPosition(p: Position, explicit: Boolean = true) = lock.withLock {
+        myPosition = p
+        if (explicit) positionExplicitlySet = true
+    }
     fun setBottomCards(cards: List<Int>) = lock.withLock { bottomCards = cards.sorted() }
 
     /** Replace my hand with [cards] (sorted, duplicates kept so count is accurate).
-     *  Also auto-detects my position when unambiguous:
-     *    17 cards -> I'm a farmer
-     *    20 cards -> I'm the landlord */
+     *  Also auto-detects my position when unambiguous AND the user hasn't
+     *  explicitly forced a role from the UI:
+     *    17 cards  -> I'm a farmer (defaults to LANDLORD_DOWN)
+     *    20 cards  -> I'm the landlord
+     *  If a play has already been recorded at 20 cards AND later hand drops
+     *  to 17, we don't flip identity (that's the farmer path). */
     fun setMyHand(cards: List<Int>) = lock.withLock {
         val sorted = cards.sorted()
         myHand = sorted
-        // Auto-detect position from the starting hand size, but only if the
-        // user hasn't explicitly changed it later (no explicit-tracking
-        // needed — the counts are clear enough at start of game that we
-        // don't overwrite deliberate changes).
+        if (positionExplicitlySet) return@withLock  // user override takes priority
         val n = sorted.size
-        if (n == 20 && myPosition != Position.LANDLORD) {
-            myPosition = Position.LANDLORD
-        } else if (n == 17 && myPosition == Position.LANDLORD) {
-            // Default was LANDLORD but we clearly have a farmer-sized hand;
-            // pick LANDLORD_DOWN as default farmer role.  User can override
-            // from the main UI role radio.
-            myPosition = Position.LANDLORD_DOWN
+        when {
+            n == 20 -> myPosition = Position.LANDLORD
+            n == 17 -> {
+                // Farmer hand; only set if currently default (LANDLORD).
+                if (myPosition == Position.LANDLORD) {
+                    myPosition = Position.LANDLORD_DOWN
+                }
+            }
         }
     }
 

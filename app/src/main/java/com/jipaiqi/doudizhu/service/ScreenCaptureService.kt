@@ -55,6 +55,13 @@ class ScreenCaptureService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val frameLock = Mutex()
+    /** Absolute time (ms) of last frame *completion*. We throttle to keep
+     *  YOLO+OCR CPU usage reasonable while still feeling real-time. */
+    @Volatile private var lastProcessMs = 0L
+    /** Minimum interval between frame processing starts.
+     *  ~400 ms = 2.5 FPS, perfect for a card game where plays happen ≥ 1 s apart. */
+    private val minIntervalMs = 400L
+    /** Serialize frame processing (on top of the throttle). */
     @Volatile private var processing = false
 
     private var projection: MediaProjection? = null
@@ -93,8 +100,13 @@ class ScreenCaptureService : Service() {
         // Default capture size: the current display's resolution.
         val (w, h, dpi) = displayMetrics()
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        // Run the ImageAvailable callback on its own dedicated handler thread
+        // so frames don't pile up waiting for the main (UI) looper.
+        val ht = HandlerThread("jipaiqi-capture").also { it.start() }
+        captureThread = ht
+        captureHandler = Handler(ht.looper)
         imageReader!!.setOnImageAvailableListener({ reader -> onFrame(reader) },
-            captureHandler ?: Handler(Looper.getMainLooper()))
+            captureHandler)
         virtualDisplay = projection?.createVirtualDisplay(
             "JiPaiQi", w, h, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -104,7 +116,13 @@ class ScreenCaptureService : Service() {
     }
 
     private fun onFrame(reader: ImageReader) {
-        if (processing) { // drop overlapping frames; OCR is the bottleneck
+        val now = System.currentTimeMillis()
+        if (processing) { // drop overlapping frames; YOLO is the bottleneck
+            runCatching { reader.acquireLatestImage()?.close() }
+            return
+        }
+        // Throttle: no point running YOLO more than ~2.5 FPS
+        if (now - lastProcessMs < minIntervalMs) {
             runCatching { reader.acquireLatestImage()?.close() }
             return
         }
@@ -116,13 +134,16 @@ class ScreenCaptureService : Service() {
                 if (bitmap != null) {
                     val core = (application as JiPaiQiApp).core
                     val pipeline = core.pipeline ?: return@launch
-                    val result = pipeline.processFrame(bitmap)
-                    if (result.stateChanged) core.notifyStateChanged()
+                    frameLock.withLock {
+                        val result = pipeline.processFrame(bitmap)
+                        if (result.stateChanged) core.notifyStateChanged()
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "frame process error: ${e.message}")
             } finally {
                 runCatching { image.close() }
+                lastProcessMs = System.currentTimeMillis()
                 processing = false
             }
         }

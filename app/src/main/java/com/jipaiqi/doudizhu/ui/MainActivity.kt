@@ -32,12 +32,18 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
 
     private lateinit var b: ActivityMainBinding
+    /** Tracks whether the user actually tapped one of the specific role buttons. */
+    private var roleManuallySelected: Boolean = false
 
     private val projectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK && result.data != null) {
-            val pos = currentRole()
+            // ScreenCaptureService requires a position to pass through; we use
+            // the user's pick if they chose one, else the default LANDLORD.
+            // The real identity is overwritten as soon as the first frame with
+            // my hand is recognized via GameState.setMyHand auto-detect.
+            val pos = currentRoleOrHint()
             ScreenCaptureService.start(this, result.resultCode, result.data!!, pos)
             FloatingWindowService.start(this)
             updateStatusRunning()
@@ -65,7 +71,11 @@ class MainActivity : AppCompatActivity() {
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
 
-        b.roleGroup.check(R.id.roleLandlord)
+        b.roleGroup.check(R.id.roleAuto)
+        b.roleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            roleManuallySelected = checkedId != R.id.roleAuto
+        }
         b.btnStart.setOnClickListener { onStartClicked() }
         b.btnStop.setOnClickListener { onStopClicked() }
 
@@ -76,7 +86,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun onStartClicked() {
         val core = (application as JiPaiQiApp).core
-        core.state.setMyPosition(currentRole())
+        // Only call setMyPosition(explicit=true) if user checked a specific
+        // (non-"自动") button.  Otherwise GameState.setMyHand is free to pick
+        // between 地主 / 农民 based on the recognized hand size (20 / 17).
+        if (roleManuallySelected) {
+            core.state.setMyPosition(currentRoleOrHint(), explicit = true)
+        } else {
+            // Clear the explicit flag so auto-detect by hand count wins.
+            core.state.positionExplicitlySet = false
+        }
         if (!Settings.canDrawOverlays(this)) {
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -100,11 +118,12 @@ class MainActivity : AppCompatActivity() {
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
     }
 
-    private fun currentRole(): Position {
+    private fun currentRoleOrHint(): Position {
         return when (b.roleGroup.checkedButtonId) {
             R.id.roleUp -> Position.LANDLORD_UP
             R.id.roleDown -> Position.LANDLORD_DOWN
-            else -> Position.LANDLORD
+            R.id.roleLandlord -> Position.LANDLORD
+            else -> Position.LANDLORD  // "自动" or no selection: hint only, gets overwritten
         }
     }
 

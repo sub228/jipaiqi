@@ -27,7 +27,13 @@ class CardOcr {
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-    data class RecognizedCard(val rank: Int, val text: String, val box: Rect)
+    data class RecognizedCard(
+        val rank: Int,
+        val text: String,
+        val box: Rect,
+        /** 0..1 confidence; OCR doesn't give one so we always supply 1f. */
+        val score: Float = 1f,
+    )
 
     /** Recognise every card-rank token in [bitmap]. */
     suspend fun recognizeWhole(bitmap: Bitmap): List<RecognizedCard> {
