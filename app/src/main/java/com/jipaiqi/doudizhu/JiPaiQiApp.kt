@@ -41,11 +41,80 @@ class JiPaiQiApp : Application() {
         // user can share it back when the app "just crashes" with no
         // visible error.  Without this, a hard crash leaves no trace.
         installCrashHandler()
+        // Boot trace file: write a marker at each step of onCreate so we
+        // can tell how far we got if the process dies mid-init.  Each line
+        // is flushed immediately.
+        val bootLog = File(externalCacheDir ?: cacheDir, "boot_log.txt")
+        val appendBoot: (String) -> Unit = { msg ->
+            runCatching {
+                bootLog.appendText("[${Date()}] $msg\n")
+            }
+            Log.i(TAG, msg)
+        }
+        appendBoot("=== JiPaiQiApp.onCreate enter ===")
+        appendBoot("Device: ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT})")
+        // Start a logcat capture thread in the background — this catches
+        // native crashes (SIGSEGV/SIGABRT) and anything else that bypasses
+        // the Java UncaughtExceptionHandler.  Writes to logcat_capture.txt.
+        startLogcatCapture(bootLog.parentFile!!)
         // Force ScreenAdaptation to parse once on the UI thread; reads from
         // assets/ which needs a live Context.
         runCatching { ScreenAdaptation.instance }
+            .onFailure { appendBoot("ScreenAdaptation FAILED: ${it.message}") }
+        appendBoot("ScreenAdaptation OK")
         core = Core(this)
+        appendBoot("Core constructed")
         Log.i(TAG, "JiPaiQiApp initialized")
+        appendBoot("=== JiPaiQiApp.onCreate exit OK ===")
+    }
+
+    /**
+     * Spawn a background thread that runs `logcat -v time` and appends its
+     * output to `logcat_capture.txt` in [dir].  This captures native-layer
+     * crashes (SIGSEGV/SIGABRT from JNI code, e.g. when libyolov8ncnn.so
+     * fails to initialize) which bypass the Java UncaughtExceptionHandler
+     * and leave no Java stack trace.  Without this, a hard native crash
+     * leaves zero trace and the user sees only "app keeps stopping".
+     */
+    private fun startLogcatCapture(dir: File) {
+        Thread {
+            runCatching {
+                val outFile = File(dir, "logcat_capture.txt")
+                // Clear the logcat buffer first so we only capture this run.
+                val clear = ProcessBuilder("logcat", "-c")
+                clear.redirectErrorStream(true).start().waitFor()
+                // -v time = show timestamp; -v threadtime includes tid which
+                // is more useful for crash triage.
+                val pb = ProcessBuilder(
+                    "logcat", "-v", "threadtime",
+                    // Filter to only our app's logs + crash/fatal tags so
+                    // the file stays small.  Remove the filter to see ALL
+                    // system logs.
+                    "JiPaiQiApp:V", "MainActivity:V", "ScreenCaptureService:V",
+                    "FloatingWindowService:V", "AndroidRuntime:E",
+                    "DEBUG:*", "libc:*", "art:E", "System.err:W",
+                    "*:F"
+                )
+                pb.redirectErrorStream(true)
+                val proc = pb.start()
+                outFile.outputStream().use { out ->
+                    proc.inputStream.use { inp ->
+                        val buf = ByteArray(8192)
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n <= 0) break
+                            out.write(buf, 0, n)
+                            out.flush()
+                        }
+                    }
+                }
+                proc.waitFor()
+            }.onFailure { Log.e(TAG, "logcat capture failed: ${it.message}", it) }
+        }.apply {
+            isDaemon = true
+            name = "logcat-capture"
+            start()
+        }
     }
 
     /**

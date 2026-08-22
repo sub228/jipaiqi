@@ -62,16 +62,35 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        b = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(b.root)
+        val bootLog = java.io.File(externalCacheDir ?: cacheDir, "boot_log.txt")
+        fun appendBoot(msg: String) {
+            runCatching { bootLog.appendText("[${java.util.Date()}] MainActivity: $msg\n") }
+            android.util.Log.i("MainActivity", msg)
+        }
+        appendBoot("=== onCreate enter ===")
+        try {
+            b = ActivityMainBinding.inflate(layoutInflater)
+            appendBoot("ActivityMainBinding inflated")
+            setContentView(b.root)
+            appendBoot("setContentView OK")
 
-        b.roleGroup.check(R.id.roleLandlord)
-        b.btnStart.setOnClickListener { onStartClicked() }
-        b.btnStop.setOnClickListener { onStopClicked() }
+            b.roleGroup.check(R.id.roleLandlord)
+            b.btnStart.setOnClickListener { onStartClicked() }
+            b.btnStop.setOnClickListener { onStopClicked() }
+            appendBoot("Buttons wired")
 
-        // Lazy-init the engine in background so the first click is fast.
-        (application as JiPaiQiApp).core.ensureReady()
-        refreshModelStatus()
+            // Lazy-init the engine in background so the first click is fast.
+            (application as JiPaiQiApp).core.ensureReady()
+            appendBoot("core.ensureReady() returned")
+            refreshModelStatus()
+            appendBoot("=== onCreate exit OK ===")
+        } catch (t: Throwable) {
+            appendBoot("onCreate THREW: ${t.javaClass.name}: ${t.message}")
+            val sw = java.io.StringWriter()
+            t.printStackTrace(java.io.PrintWriter(sw))
+            appendBoot(sw.toString())
+            throw t
+        }
     }
 
     private fun onStartClicked() {
