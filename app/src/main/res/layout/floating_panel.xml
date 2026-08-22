@@ -349,7 +349,9 @@
                     tools:ignore="HardcodedText" />
             </LinearLayout>
 
-            <!-- Rank grid. Hidden until the first frame is processed. -->
+            <!-- Rank grid. Shown immediately with full-deck counts (matches
+                 original APK's "fresh deal" display); counts decrement once
+                 the recognizer sees the actual hand/played cards. -->
             <LinearLayout
                 android:id="@+id/ll_num_list"
                 android:layout_width="wrap_content"
@@ -359,14 +361,14 @@
                 android:layout_gravity="center_vertical"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
-                android:visibility="gone">
+                android:visibility="visible">
 
                 <View
                     android:id="@+id/line"
                     android:layout_width="@dimen/dp_1"
                     android:layout_height="@dimen/dp_45"
                     android:background="@color/white_80"
-                    android:visibility="gone" />
+                    android:visibility="visible" />
 
                 <!-- 15 rank cells are inflated here at runtime. -->
                 <LinearLayout
