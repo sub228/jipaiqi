@@ -20,6 +20,17 @@
     <!-- Vibrate to notify user of an AI suggestion / "no more 2s" alert -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- All files access: needed so crash logs can be written to
+         /sdcard/Download/ where the user can actually see them.  Android
+         11+/HarmonyOS hide Android/data/<pkg>/ from normal file managers,
+         but /sdcard/Download/ is always visible. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <application
         android:name=".JiPaiQiApp"
         android:allowBackup="false"

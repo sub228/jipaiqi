@@ -45,14 +45,27 @@ class JiPaiQiApp : Application() {
         // can tell how far we got if the process dies mid-init.  Each line
         // is flushed immediately.
         val bootLog = File(externalCacheDir ?: cacheDir, "boot_log.txt")
+        LogStore.recordBootPath(bootLog)
+        // Also expose the path to the in-app "查看日志" dialog via LogStore.
         val appendBoot: (String) -> Unit = { msg ->
+            LogStore.append(msg)   // ← always succeeds; survives even if fs is sandboxed
+            runCatching { bootLog.appendText("[${Date()}] $msg\n") }
+            // Also try writing to /sdcard/Download/ where the user can
+            // actually see it on HarmonyOS / Android 11+ (Android/data/
+            // is hidden from normal file managers there).
             runCatching {
-                bootLog.appendText("[${Date()}] $msg\n")
+                val pub = File(
+                    android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS
+                    ), "jipaiqi_boot_log.txt"
+                )
+                pub.appendText("[${Date()}] $msg\n")
             }
             Log.i(TAG, msg)
         }
         appendBoot("=== JiPaiQiApp.onCreate enter ===")
         appendBoot("Device: ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT})")
+        appendBoot("App versionCode: ${runCatching { packageManager.getPackageInfo(packageName, 0).versionCode }.getOrDefault(-1)}")
         // Start a logcat capture thread in the background — this catches
         // native crashes (SIGSEGV/SIGABRT) and anything else that bypasses
         // the Java UncaughtExceptionHandler.  Writes to logcat_capture.txt.
@@ -80,6 +93,7 @@ class JiPaiQiApp : Application() {
         Thread {
             runCatching {
                 val outFile = File(dir, "logcat_capture.txt")
+                LogStore.recordLogcatPath(outFile)
                 // Clear the logcat buffer first so we only capture this run.
                 val clear = ProcessBuilder("logcat", "-c")
                 clear.redirectErrorStream(true).start().waitFor()
@@ -99,12 +113,27 @@ class JiPaiQiApp : Application() {
                 val proc = pb.start()
                 outFile.outputStream().use { out ->
                     proc.inputStream.use { inp ->
+                        // Line-buffer: emit a LogStore line per logcat line
+                        // so the in-app "查看日志" view mirrors what hit disk.
+                        val sb = StringBuilder()
                         val buf = ByteArray(8192)
                         while (true) {
                             val n = inp.read(buf)
                             if (n <= 0) break
                             out.write(buf, 0, n)
                             out.flush()
+                            // Mirror into memory for the in-app viewer.
+                            sb.setLength(0)
+                            for (i in 0 until n) {
+                                val c = buf[i].toInt().toChar()
+                                if (c == '\n') {
+                                    LogStore.append("[logcat] ${sb}")
+                                    sb.setLength(0)
+                                } else {
+                                    sb.append(c)
+                                }
+                            }
+                            if (sb.isNotEmpty()) LogStore.append("[logcat] $sb")
                         }
                     }
                 }
@@ -129,7 +158,8 @@ class JiPaiQiApp : Application() {
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching {
                 val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val file = File(externalCacheDir ?: cacheDir, "crash_log_$ts.txt")
+                val dir = externalCacheDir ?: cacheDir
+                val file = File(dir, "crash_log_$ts.txt")
                 // Read version from PackageManager instead of BuildConfig —
                 // BuildConfig lives in a secondary dex and may not be loaded
                 // yet when the crash handler fires on app startup.
@@ -151,7 +181,20 @@ class JiPaiQiApp : Application() {
                     throwable.printStackTrace(PrintWriter(sw))
                     w.println(sw.toString())
                 }
+                LogStore.recordCrashPath(file)
+                LogStore.append("=== CRASH: ${throwable.javaClass.name}: ${throwable.message} ===")
+                LogStore.append(StringWriter().also { throwable.printStackTrace(PrintWriter(it)) }.toString())
                 Log.e(TAG, "CRASH logged to ${file.absolutePath}", throwable)
+                // Also write to /sdcard/Download/ so it's visible on
+                // HarmonyOS / Android 11+ where Android/data/ is hidden.
+                runCatching {
+                    val pubDir = android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS
+                    )
+                    val pubFile = File(pubDir, "jipaiqi_crash_log_$ts.txt")
+                    pubFile.writeText(file.readText())
+                    Log.e(TAG, "CRASH also logged to ${pubFile.absolutePath}")
+                }
             }
             previous?.uncaughtException(thread, throwable)
         }
