@@ -61,11 +61,21 @@ class JiPaiQiApp : Application() {
             runCatching {
                 val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
                 val file = File(externalCacheDir ?: cacheDir, "crash_log_$ts.txt")
+                // Read version from PackageManager instead of BuildConfig —
+                // BuildConfig lives in a secondary dex and may not be loaded
+                // yet when the crash handler fires on app startup.
+                val verName = runCatching {
+                    packageManager.getPackageInfo(packageName, 0).versionName
+                }.getOrDefault("?")
+                val verCode = runCatching {
+                    @Suppress("DEPRECATION")
+                    packageManager.getPackageInfo(packageName, 0).versionCode
+                }.getOrDefault(0)
                 PrintWriter(file).use { w ->
                     w.println("=== JiPaiQi crash report ===")
                     w.println("Time: ${Date()}")
                     w.println("Thread: ${thread.name} (${thread.id})")
-                    w.println("App version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                    w.println("App version: $verName ($verCode)")
                     w.println("Device: ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT})")
                     w.println()
                     val sw = StringWriter()
