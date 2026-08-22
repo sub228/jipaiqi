@@ -1,6 +1,7 @@
 package com.jipaiqi.doudizhu
 
 import android.app.Application
+import android.os.Build
 import android.util.Log
 import com.example.qnjisuanqi.YoloAPI
 import com.jipaiqi.doudizhu.ai.CardDetector
@@ -11,6 +12,12 @@ import com.jipaiqi.doudizhu.ai.NativeYoloPipeline
 import com.jipaiqi.doudizhu.ai.Position
 import com.jipaiqi.doudizhu.ai.RecognitionPipeline
 import com.jipaiqi.doudizhu.ai.ScreenAdaptation
+import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Application singleton + shared runtime state.
@@ -29,11 +36,46 @@ class JiPaiQiApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // Install a global uncaught-exception handler that dumps the full
+        // stack trace to a crash log file in external cache dir, so the
+        // user can share it back when the app "just crashes" with no
+        // visible error.  Without this, a hard crash leaves no trace.
+        installCrashHandler()
         // Force ScreenAdaptation to parse once on the UI thread; reads from
         // assets/ which needs a live Context.
         runCatching { ScreenAdaptation.instance }
         core = Core(this)
         Log.i(TAG, "JiPaiQiApp initialized")
+    }
+
+    /**
+     * Write every uncaught exception's stack trace to
+     * `externalCacheDir/crash_log_<timestamp>.txt` and then re-throw to the
+     * default handler (so the system still shows the "app keeps stopping"
+     * dialog).  The file path is logged via Log.e so it surfaces in logcat
+     * too.
+     */
+    private fun installCrashHandler() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                val file = File(externalCacheDir ?: cacheDir, "crash_log_$ts.txt")
+                PrintWriter(file).use { w ->
+                    w.println("=== JiPaiQi crash report ===")
+                    w.println("Time: ${Date()}")
+                    w.println("Thread: ${thread.name} (${thread.id})")
+                    w.println("App version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                    w.println("Device: ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT})")
+                    w.println()
+                    val sw = StringWriter()
+                    throwable.printStackTrace(PrintWriter(sw))
+                    w.println(sw.toString())
+                }
+                Log.e(TAG, "CRASH logged to ${file.absolutePath}", throwable)
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
     }
 
     companion object {
