@@ -1,6 +1,7 @@
 package com.jipaiqi.doudizhu
 
 import android.app.Application
+import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.example.qnjisuanqi.YoloAPI
@@ -204,6 +205,12 @@ class JiPaiQiApp : Application() {
         private const val TAG = "JiPaiQiApp"
         @Volatile lateinit var instance: JiPaiQiApp
             private set
+        /** SharedPreferences name for the native-YOLO crash counter. */
+        private const val CRASH_PREFS = "native_yolo_state"
+        /** Key inside [CRASH_PREFS] holding the current crash count. */
+        private const val CRASH_KEY = "init_crash_count"
+        /** Max SIGSEGV crashes before permanently skipping native YOLO. */
+        private const val MAX_YOLO_CRASHES = 2
     }
 
     class Core(private val app: Application) {
@@ -247,15 +254,41 @@ class JiPaiQiApp : Application() {
             // 2) ORIGINAL native YOLO (libyolov8ncnn.so).  This is the
             //    preferred recognizer.  It calls the ORIGINAL C++ NCNN
             //    trained weights (yolo_n.bin/param) straight from assets.
-            nativeYolo = runCatching {
-                val api = YoloAPI()
-                val ok = api.Init()   // → loads yolo_n.bin/param via assets
-                Log.i(TAG, "Native YOLO Init() returned ok=$ok")
-                if (ok) api else null
-            }.getOrElse { t ->
-                Log.e(TAG, "Native YOLO failed: ${t.message}", t); null
+            //
+            //    CRASH GUARD: libyolov8ncnn.so can SIGSEGV inside Init()
+            //    on incompatible ABIs / API levels (e.g. HUAWEI API 36).
+            //    A native signal crash kills the entire process regardless
+            //    of which thread it runs on — runCatching cannot intercept
+            //    it.  We persist a crash counter to SharedPreferences:
+            //    before calling Init() we increment+commit the counter;
+            //    if Init() succeeds we reset it to 0.  If the process is
+            //    killed by SIGSEGV the incremented counter survives, and
+            //    on the next launch we skip native YOLO entirely, falling
+            //    back to the pure-OCR pipeline.
+            val crashPrefs = app.getSharedPreferences(CRASH_PREFS, Context.MODE_PRIVATE)
+            val crashCount = crashPrefs.getInt(CRASH_KEY, 0)
+            if (crashCount >= MAX_YOLO_CRASHES) {
+                Log.w(TAG, "Native YOLO skipped — crashed $crashCount times " +
+                    "(limit=$MAX_YOLO_CRASHES). Using OCR-only fallback.")
+                nativeYoloReady = false
+            } else {
+                // Pre-increment BEFORE calling Init(): if Init() SIGSEGVs
+                // the process dies but the incremented counter survives.
+                crashPrefs.edit().putInt(CRASH_KEY, crashCount + 1).commit()
+                nativeYolo = runCatching {
+                    val api = YoloAPI()
+                    val ok = api.Init()   // → loads yolo_n.bin/param via assets
+                    // Init() returned without crashing — reset the counter.
+                    crashPrefs.edit().putInt(CRASH_KEY, 0).commit()
+                    Log.i(TAG, "Native YOLO Init() returned ok=$ok")
+                    if (ok) api else null
+                }.getOrElse { t ->
+                    // Java exception (not SIGSEGV) — reset the counter.
+                    crashPrefs.edit().putInt(CRASH_KEY, 0).commit()
+                    Log.e(TAG, "Native YOLO failed: ${t.message}", t); null
+                }
+                nativeYoloReady = nativeYolo != null
             }
-            nativeYoloReady = nativeYolo != null
 
             // 3) ML Kit OCR fallback (handles opponent-count boxes).
             ocr = runCatching { CardOcr() }.getOrNull()
@@ -278,6 +311,17 @@ class JiPaiQiApp : Application() {
             ready = true
             Log.i(TAG, "Core ready: nativeYolo=$nativeYoloReady " +
                 "yolo=${yolo != null} douZero=${douZero != null} models=$modelsPresent")
+        }
+
+        /**
+         * Reset the native-YOLO crash counter so the next [ensureReady]
+         * call will attempt to load libyolov8ncnn.so again.  Call this
+         * after an app update that may ship a fixed .so, or when the
+         * user explicitly wants to retry the native detector.
+         */
+        fun resetNativeYoloCrashCounter() {
+            val prefs = app.getSharedPreferences(CRASH_PREFS, Context.MODE_PRIVATE)
+            prefs.edit().putInt(CRASH_KEY, 0).commit()
         }
 
         fun notifyStateChanged() { onStateChanged?.invoke() }

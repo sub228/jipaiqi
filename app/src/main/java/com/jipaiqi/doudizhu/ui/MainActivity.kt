@@ -105,8 +105,17 @@ class MainActivity : AppCompatActivity() {
             // the recognizer never came online.
             Thread {
                 runCatching {
-                    (application as JiPaiQiApp).core.ensureReady()
+                    val core = (application as JiPaiQiApp).core
+                    core.ensureReady()
                     appendBoot("core.ensureReady() returned (background)")
+                    appendBoot("nativeYoloReady=${core.nativeYoloReady} " +
+                        "pipeline=${core.pipeline != null} douZero=${core.douZero != null}")
+                    if (!core.nativeYoloReady) {
+                        val prefs = getSharedPreferences("native_yolo_state", Context.MODE_PRIVATE)
+                        val crashes = prefs.getInt("init_crash_count", 0)
+                        appendBoot("Native YOLO disabled (crash count=$crashes). " +
+                            "Using OCR-only mode.")
+                    }
                     runOnUiThread {
                         appendBoot("refreshModelStatus on main")
                         refreshModelStatus()
@@ -148,6 +157,12 @@ class MainActivity : AppCompatActivity() {
             setTextIsSelectable(true)
         }
         val scroll = ScrollView(this).apply { addView(tv) }
+        // Check if native YOLO is disabled by crash guard.
+        val crashPrefs = getSharedPreferences("native_yolo_state", Context.MODE_PRIVATE)
+        val crashCount = crashPrefs.getInt("init_crash_count", 0)
+        // When crash guard has disabled native YOLO, the neutral button
+        // becomes "重试YOLO" (reset counter); otherwise it's "刷新".
+        val neutralText = if (crashCount >= 2) "重试YOLO" else "刷新"
         AlertDialog.Builder(this)
             .setTitle("调试日志  (${content.length} chars)")
             .setView(scroll)
@@ -157,7 +172,16 @@ class MainActivity : AppCompatActivity() {
                 cm.setPrimaryClip(ClipData.newPlainText("jipaiqi_log", content))
                 Toast.makeText(this, "日志已复制到剪贴板", Toast.LENGTH_SHORT).show()
             }
-            .setNeutralButton("刷新") { _, _ -> showLogDialog() }
+            .setNeutralButton(neutralText) { _, _ ->
+                if (crashCount >= 2) {
+                    (application as JiPaiQiApp).core.resetNativeYoloCrashCounter()
+                    Toast.makeText(this,
+                        "崩溃计数器已重置，下次启动将重试原生YOLO",
+                        Toast.LENGTH_LONG).show()
+                } else {
+                    showLogDialog()
+                }
+            }
             .setNegativeButton("关闭", null)
             .show()
     }
@@ -209,6 +233,9 @@ class MainActivity : AppCompatActivity() {
             // Run heavy load off the main thread.
             val hasDou = runCatching { core.douZero?.let { e ->
                 Position.values().count { e.hasModel(it) } } ?: 0 }.getOrDefault(0)
+            // Check if native YOLO was disabled by the crash guard.
+            val crashPrefs = getSharedPreferences("native_yolo_state", Context.MODE_PRIVATE)
+            val crashCount = crashPrefs.getInt("init_crash_count", 0)
             // PREFERENCE: original-native-YOLO ✓ > custom-ONNX-YOLO ✓ > none
             val yoloBadge = when {
                 core.nativeYoloReady -> "✓(原版NCNN)"
@@ -217,7 +244,13 @@ class MainActivity : AppCompatActivity() {
             }
             val txt = buildString {
                 append("模型：DouZero ${hasDou}/3  ·  YOLO ").append(yoloBadge)
-                if (!core.nativeYoloReady && core.yolo == null) append("  (纯 OCR 模式)")
+                if (!core.nativeYoloReady && core.yolo == null) {
+                    if (crashCount >= 2) {
+                        append("  (原生YOLO已禁用·纯OCR模式)")
+                    } else {
+                        append("  (纯 OCR 模式)")
+                    }
+                }
             }
             b.modelStatus.text = txt
             if (hasDou == 0 && !core.nativeYoloReady && core.yolo == null) {

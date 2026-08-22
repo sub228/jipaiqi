@@ -70,7 +70,14 @@ class DouZeroEngine private constructor(
 
         return try {
             val inputs = mapOf(inputZ to zTensor, inputX to xTensor)
-            val output = session.run(inputs).use { it.get(0).value as FloatArray }
+            // The DouZero ONNX output shape is (N, 1), which the ORT Java
+            // binding returns as either FloatArray (when squeezed to [N]) or
+            // Array<FloatArray> (raw [N][1]). Handle both shapes to avoid
+            // "float[][] cannot be cast to float[]" ClassCastException.
+            val output = session.run(inputs).use { raw ->
+                flattenToFloatArray(raw.get(0).value)
+            }
+            if (output.isEmpty()) return null
             val bestIdx = argmax(output)
             Recommendation(
                 action = encoded.legalActions[bestIdx],
@@ -88,6 +95,32 @@ class DouZeroEngine private constructor(
     fun close() {
         sessions.values.forEach { runCatching { it.close() } }
         runCatching { env.close() }
+    }
+
+    /**
+     * Coerce the raw ORT scalar/tensor value into a flat FloatArray.
+     * Handles FloatArray (shape [N]), Array<FloatArray> (shape [N][1]),
+     * and boxed scalar floats.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun flattenToFloatArray(value: Any?): FloatArray = when (value) {
+        null -> FloatArray(0)
+        is FloatArray -> value
+        is Array<*> -> {
+            if (value.isArrayOf<FloatArray>()) {
+                val rows = value as Array<FloatArray>
+                if (rows.isEmpty()) FloatArray(0)
+                else if (rows.all { it.size == 1 }) FloatArray(rows.size) { rows[it][0] }
+                else rows.flatMap { it.toList() }.toFloatArray()
+            } else if (value.isArrayOf<Float>()) {
+                (value as Array<Float>).toFloatArray()
+            } else {
+                FloatArray(0)
+            }
+        }
+        is Float -> floatArrayOf(value)
+        is Number -> floatArrayOf(value.toFloat())
+        else -> FloatArray(0)
     }
 
     private fun argmax(arr: FloatArray): Int {
