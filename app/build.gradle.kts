@@ -11,8 +11,8 @@ android {
         applicationId = "com.jipaiqi.doudizhu"
         minSdk = 26
         targetSdk = 34
-        versionCode = 224
-        versionName = "2.2.4"
+        versionCode = 220
+        versionName = "2.2-inapp-log"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

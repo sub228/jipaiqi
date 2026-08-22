@@ -1,5 +1,7 @@
 package com.jipaiqi.doudizhu.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
@@ -7,11 +9,15 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.jipaiqi.doudizhu.JiPaiQiApp
+import com.jipaiqi.doudizhu.LogStore
 import com.jipaiqi.doudizhu.R
 import com.jipaiqi.doudizhu.ai.Position
 import com.jipaiqi.doudizhu.databinding.ActivityMainBinding
@@ -62,16 +68,98 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        b = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(b.root)
+        val bootLog = java.io.File(externalCacheDir ?: cacheDir, "boot_log.txt")
+        LogStore.recordBootPath(bootLog)
+        fun appendBoot(msg: String) {
+            LogStore.append("[MainActivity] $msg")
+            runCatching { bootLog.appendText("[${java.util.Date()}] MainActivity: $msg\n") }
+            runCatching {
+                java.io.File(
+                    android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS
+                    ), "jipaiqi_boot_log.txt"
+                ).appendText("[${java.util.Date()}] MainActivity: $msg\n")
+            }
+            android.util.Log.i("MainActivity", msg)
+        }
+        appendBoot("=== onCreate enter ===")
+        try {
+            b = ActivityMainBinding.inflate(layoutInflater)
+            appendBoot("ActivityMainBinding inflated")
+            setContentView(b.root)
+            appendBoot("setContentView OK")
 
-        b.roleGroup.check(R.id.roleLandlord)
-        b.btnStart.setOnClickListener { onStartClicked() }
-        b.btnStop.setOnClickListener { onStopClicked() }
+            b.roleGroup.check(R.id.roleLandlord)
+            b.btnStart.setOnClickListener { onStartClicked() }
+            b.btnStop.setOnClickListener { onStopClicked() }
+            b.btnViewLog.setOnClickListener { showLogDialog() }
+            appendBoot("Buttons wired")
 
-        // Lazy-init the engine in background so the first click is fast.
-        (application as JiPaiQiApp).core.ensureReady()
-        refreshModelStatus()
+            // Lazy-init the engine ASYNCHRONOUSLY on a background thread.
+            // The original 王者记牌器 native YOLO (`libyolov8ncnn.so`) can
+            // hard-crash the process on HarmonyOS 7.0 if loaded on the UI
+            // thread — Init() may SIGSEGV on an incompatible ABI / missing
+            // dependency.  Running it off-thread means the worst case is a
+            // background crash that Android recovers from, while the UI
+            // still comes up so the user can hit "查看调试日志" to see why
+            // the recognizer never came online.
+            Thread {
+                runCatching {
+                    (application as JiPaiQiApp).core.ensureReady()
+                    appendBoot("core.ensureReady() returned (background)")
+                    runOnUiThread {
+                        appendBoot("refreshModelStatus on main")
+                        refreshModelStatus()
+                    }
+                }.onFailure { ex ->
+                    appendBoot("core.ensureReady() FAILED: ${ex.javaClass.name}: ${ex.message}")
+                    val sw = java.io.StringWriter()
+                    ex.printStackTrace(java.io.PrintWriter(sw))
+                    if (sw.toString().isNotEmpty()) appendBoot(sw.toString())
+                }
+            }.apply { isDaemon = true; name = "core-ensureReady" }.start()
+            appendBoot("=== onCreate exit OK ===")
+        } catch (t: Throwable) {
+            appendBoot("onCreate THREW: ${t.javaClass.name}: ${t.message}")
+            val sw = java.io.StringWriter()
+            t.printStackTrace(java.io.PrintWriter(sw))
+            appendBoot(sw.toString())
+            throw t
+        }
+    }
+
+    /**
+     * In-app log viewer.  Renders the in-memory LogStore ring buffer (plus
+     * any on-disk boot/crash/logcat files that exist) into a scrollable
+     * TextView with a "复制日志" button.  This exists precisely so the
+     * user doesn't have to hunt for `/sdcard/Download/` or
+     * `Android/data/<pkg>/cache/` — on HarmonyOS 7.0 those paths are
+     * invisible to normal file managers, so the only reliable way to get
+     * triage data out is to surface it inside the app itself.
+     */
+    private fun showLogDialog() {
+        val content = LogStore.snapshotWithFiles()
+        val tv = TextView(this).apply {
+            text = content
+            textSize = 11f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(0xFFEEEEEE.toInt())
+            setPadding(48, 32, 48, 32)
+            setTextIsSelectable(true)
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+        AlertDialog.Builder(this)
+            .setTitle("调试日志  (${content.length} chars)")
+            .setView(scroll)
+            .setPositiveButton("复制日志") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE)
+                    as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("jipaiqi_log", content))
+                Toast.makeText(this, "日志已复制到剪贴板", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("刷新") { _, _ -> showLogDialog() }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     private fun onStartClicked() {

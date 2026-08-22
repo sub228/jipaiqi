@@ -66,7 +66,7 @@ class FloatingWindowService : Service() {
 
     /** Toggle states for the function pills (true = ON, checkmark shown). */
     private var aiPanelOn = true
-    private var historyOn = true
+    private var historyOn = false
     private var resetOn = false
     private var antiCheatOn = true
 
@@ -128,10 +128,7 @@ class FloatingWindowService : Service() {
             val label = cell.findViewById<TextView>(R.id.rankLabel)
             val count = cell.findViewById<TextView>(R.id.countText)
             label.text = Card.label(rank)
-            // Initial count = full deck count per rank (4 for ranks, 1 for jokers).
-            // Matches the original APK's "fresh deal" display before any card
-            // has been recognized — counters then decrement as cards land.
-            count.text = Card.TOTAL[rank].toString()
+            count.text = "—"
             b.numList.addView(cell)
             cells[rank] = CellViews(cell, label, count)
         }
@@ -239,32 +236,9 @@ class FloatingWindowService : Service() {
         updateStatusDots(b, core)
 
         val hasHand = snapshot.playerHandCards.isNotEmpty()
-        // (v2.2.4) 始终显示记牌条 (ll_num_list) 与分隔线 (line)，与原版
-        //   APK 行为一致。无手牌时显示满牌数；手牌/出牌识别后自动递减。
-        //   不再在 "等待牌局正式开始" 与 "记牌条" 之间二选一。
-        b.nostart.visibility = View.GONE
-        b.llNumList.visibility = View.VISIBLE
-        b.line.visibility = View.VISIBLE
-
-        // ── Diagnostic overlay: surface the last NCNN frame statistics.
-        //    放在 3 个指示灯下方的 record_status_text（原本显示 "异常"
-        //    的小文字），不挤占记牌条空间；有手牌时保留 last 状态不自动隐藏。
-        runCatching {
-            val statusTv = b.recordStatusText
-            val detCnt = ScreenCaptureService.sLastFrameDetections
-            val handCnt = ScreenCaptureService.sLastFrameHandCount
-            val prefix: String = when {
-                hasHand -> "已识别${snapshot.playerHandCards.size}张"
-                detCnt >= 20 -> "NCNN=${detCnt}框/聚类中…"
-                detCnt > 0 -> "NCNN=${detCnt}框/handCnt=$handCnt…"
-                core.nativeYoloReady -> "原版NCNN已就绪(等发牌或出牌画面)…"
-                else -> "识别核心未就绪…"
-            }
-            statusTv.text = prefix
-            statusTv.setTextColor(0xFF58E882.toInt())   // 绿色，与原版一致
-            statusTv.textSize = 9f                       // 8sp → 9sp，看得清
-            statusTv.visibility = View.VISIBLE
-        }
+        b.nostart.visibility = if (hasHand) View.GONE else View.VISIBLE
+        b.llNumList.visibility = if (hasHand) View.VISIBLE else View.GONE
+        b.line.visibility = if (hasHand) View.VISIBLE else View.GONE
 
         // Remaining = total - myHand - played_all, per rank.
         // NOTE: don't collapse to Set — duplicate ranks must be counted.
@@ -313,33 +287,18 @@ class FloatingWindowService : Service() {
     private fun updateHistory(b: FloatingPanelBinding, snapshot: InfoSetSnapshot) {
         val container = b.historyCards
         container.removeAllViews()
-        // Use the position-tagged action sequence so we can label each line
-        // with who played it (地主 / 上家 / 下家 / 我).  Falls back to the
-        // plain rank-only sequence when the position info is missing.
-        val seq = snapshot.cardPlayActionSeqWithPosition
-            .filter { it.second.isNotEmpty() }
-            .takeLast(MAX_HISTORY_LINES)
+        val seq = snapshot.cardPlayActionSeq.filter { it.isNotEmpty() }.takeLast(MAX_HISTORY_LINES)
         if (seq.isEmpty()) return
-        for ((position, play) in seq.asReversed()) {
-            val moveType = MoveDetector.getMoveType(play).type
-            val actionTag = when (moveType) {
-                MoveType.BOMB, MoveType.KING_BOMB -> "炸"
-                MoveType.PASS -> "过"
-                else -> "出"
+        for (play in seq.asReversed()) {
+            val label = MoveDetector.getMoveType(play).let {
+                when (it.type) {
+                    MoveType.BOMB, MoveType.KING_BOMB -> "炸"
+                    else -> "出"
+                }
             }
-            val who = positionLabel(position, snapshot.playerPosition)
-            val label = "$who·$actionTag"
             val cards = play.joinToString(" ") { Card.label(it) }
             container.addView(buildHistoryRow(label, cards))
         }
-    }
-
-    /** Label a seat from the user's perspective (myself = 我). */
-    private fun positionLabel(pos: Position, me: Position): String = when (pos) {
-        me -> "我"
-        Position.LANDLORD -> "地主"
-        Position.LANDLORD_UP -> "上家"
-        Position.LANDLORD_DOWN -> "下家"
     }
 
     /** One gold-tagged history row: [tag] [cards]. Matches float_history_item.xml. */
@@ -378,16 +337,6 @@ class FloatingWindowService : Service() {
     /** Run DouZero (or heuristic) and fill aioutput0/1/2. */
     private fun updateAiPanel(b: FloatingPanelBinding, snapshot: InfoSetSnapshot, core: JiPaiQiApp.Core) {
         if (!aiPanelOn) return
-        // Snapshot the hand size on the UI thread so the async block doesn't
-        // race with a state update between showing "AI正在准备中..." and
-        // actually publishing the recommendation.
-        val handSize = snapshot.playerHandCards.size
-        if (handSize == 0) {
-            b.aioutput0.text = ""
-            b.aioutput1.text = "AI：等待识别手牌…"
-            b.aioutput2.text = ""
-            return
-        }
         b.aioutput1.text = "AI正在准备中..."
         scope.launch {
             val rec: DouZeroEngine.Recommendation? = try {
@@ -401,27 +350,18 @@ class FloatingWindowService : Service() {
             mainHandler.post {
                 if (rec == null) {
                     b.aioutput0.text = ""
-                    b.aioutput1.text = "AI：暂无建议"
+                    b.aioutput1.text = "AI：等待识别手牌…"
                     b.aioutput2.text = ""
                     return@post
                 }
                 val info = MoveDetector.getMoveType(rec.action)
                 b.aioutput0.text = "推荐：" + formatAction(rec.action)
                 b.aioutput1.text = "牌型：" + moveTypeLabel(info.type)
-                // Score line: DouZero models emit a per-action value (higher
-                // = better); show it as a 2-decimal score for parity with
-                // the original APK's "评分" feature.  Heuristic/PASS paths
-                // leave the score blank because there's no value to show.
-                val sourceStr = when (rec.source) {
+                b.aioutput2.text = "来源：" + when (rec.source) {
                     DouZeroEngine.Source.MODEL -> "DouZero"
                     DouZeroEngine.Source.HEURISTIC -> "启发"
                     DouZeroEngine.Source.PASS -> "过牌"
                 }
-                val scoreStr = if (rec.source == DouZeroEngine.Source.MODEL
-                    && !rec.value.isNaN()) {
-                    " 评分:" + "%.2f".format(rec.value)
-                } else ""
-                b.aioutput2.text = "来源：$sourceStr$scoreStr"
             }
         }
     }
