@@ -39,23 +39,6 @@ class NativeYoloPipeline(
     /** Used to smooth y-boundary estimation across frames (slightly better
      *  than a fixed 66% cut when players resize the host app window). */
     private var adaptiveHandYTopPx: Int = -1
-    /**
-     * Last frame's accepted hand-row yMean (in pixels).  Used to penalize
-     * candidate clusters whose yMean is far from the previously accepted
-     * hand row — this is the key stabilization against the per-frame
-     * `handCnt` 12 → 18 → 17 oscillation: when 2 clusters both look like a
-     * plausible hand row, we prefer the one that matches where the hand
-     * was on the previous frame, so a noisy single frame cannot flip the
-     * hand row to the played-cards band and back.
-     */
-    private var lastHandRowYMean: Float = -1f
-    /**
-     * Two-frame confirmation buffer: a candidate hand signature must be
-     * observed on 2 consecutive frames before it replaces [state.myHand()].
-     * This filters out transient YOLO over/under-detection that flips the
-     * hand count by a few cards for one frame.
-     */
-    private var pendingHandRanks: List<Int>? = null
 
     data class Cluster(
         val cards: MutableList<YoloAPI.Obj> = mutableListOf(),
@@ -91,8 +74,6 @@ class NativeYoloPipeline(
         lastTableSig = null
         emptyTableFrames = 0
         adaptiveHandYTopPx = -1
-        lastHandRowYMean = -1f
-        pendingHandRanks = null
     }
 
     fun processFrame(frame: Bitmap): FrameResult {
@@ -129,37 +110,16 @@ class NativeYoloPipeline(
         val rows = clusters.map { it.finalize() }.sortedBy { it.yMean }
 
         // 3) Identify the BOTTOMMOST large cluster as the hand row.
-        //    STABILITY FIX (v2.2.4): the previous version reversed-iterated
-        //    and broke on the first candidate with size>=5 and x-range>30%.
-        //    When YOLO momentarily under-detects the hand row to 4 cards,
-        //    that loop would latch onto a played-cards cluster instead —
-        //    which is exactly the 12 → 18 → 17 handCnt flicker the user
-        //    saw.  Now we evaluate *all* candidates by a scored penalty:
-        //      size bonus + (deeper-y bonus) − |Δ from last hand yMean|
-        //    and pick the argmax.  The "close to last frame" penalty is
-        //    what keeps the hand row pinned to the bottom band even when
-        //    another cluster briefly looks like a plausible hand row.
         var handRow: Cluster? = null
-        val candidates = ArrayList<Pair<Cluster, Float>>()
-        for (c in rows) {
-            // Tighter gate: hand row needs >= 6 cards (一张牌的对手出牌区
-            // 通常 1..5 张，避免误识别为手牌行) and a wide horizontal spread.
-            if (c.cards.size < 6) continue
-            val xMin = c.cards.minOf { it.x - it.w / 2 }
-            val xMax = c.cards.maxOf { it.x + it.w / 2 }
-            if ((xMax - xMin) < w * 0.40f) continue
-            // Score = size weight (bigger hand = more likely correct) +
-            // depth bonus (hand row is bottommost) − distance penalty.
-            val sizeScore = c.cards.size.toFloat()
-            val depthScore = (c.yMean / h) * 5f            // 0..5 range
-            val distPenalty = if (lastHandRowYMean < 0f) 0f
-                else kotlin.math.abs(c.yMean - lastHandRowYMean) / h * 8f
-            val score = sizeScore + depthScore - distPenalty
-            candidates.add(c to score)
-        }
-        if (candidates.isNotEmpty()) {
-            handRow = candidates.maxByOrNull { it.second }?.first
-            if (handRow != null) lastHandRowYMean = handRow.yMean
+        for (i in rows.indices.reversed()) {
+            val c = rows[i]
+            // A valid hand row has >= 8 cards (斗地主 opening is 17/20) and
+            // its cards are spread horizontally (x-range is > 40% screen).
+            if (c.cards.size >= 5) {
+                val xMin = c.cards.minOf { it.x - it.w / 2 }
+                val xMax = c.cards.maxOf { it.x + it.w / 2 }
+                if ((xMax - xMin) > w * 0.30f) { handRow = c; break }
+            }
         }
         // Fallback — use the config handRowTopPct (66% default) if clustering
         // could not find a distinct hand row.
@@ -167,10 +127,7 @@ class NativeYoloPipeline(
             val cutLine = (screen.handRowTopPct * h).toInt()
             val fallback = Cluster()
             for (o in sortedByY) if (o.y >= cutLine) fallback.add(o)
-            if (fallback.cards.size >= 5) {
-                handRow = fallback.finalize()
-                lastHandRowYMean = fallback.yMean
-            }
+            if (fallback.cards.size >= 5) handRow = fallback.finalize()
         }
         val handYTopPx = if (handRow != null) {
             (handRow.yMean - handRow.cards.maxOf { it.h } * 0.6f).toInt()
@@ -204,47 +161,33 @@ class NativeYoloPipeline(
         // 6) Table plays: deduplicate each cluster separately, then merge
         //    clusters that are horizontally close (cards of one play often
         //    end up split across 2 y-clusters because of 大小王 overhang).
-        //    IMPORTANT: keep each merged play as a SEPARATE entry — the
-        //    previous code flattened every table cluster into one big list
-        //    via `mergePhysicallyAdjacent`, which then recorded a single
-        //    garbage "play" composed of every card on the table.  Instead,
-        //    we now produce a list of distinct plays and record each one
-        //    (when its signature changes from the previous frame).
-        val mergedPlays: List<List<YoloAPI.Obj>> = mergePhysicallyAdjacentPlays(tableClusters)
+        val tablePlays = LinkedHashMap<String, List<Int>>()
+        for (tc in tableClusters) {
+            val dedup = dedupeHorizontal(tc.cards)
+            if (dedup.isEmpty()) continue
+            val ranks = dedup.map { YoloLabelBridge.toRank(it) }.sorted()
+            val sig = ranks.joinToString(",")
+            if (sig.isNotEmpty()) tablePlays[sig] = ranks
+        }
+        // Merge physically adjacent plays (within 20% of width of each
+        // other, horizontally) — they are one player's play.
+        val mergedTable = mergePhysicallyAdjacent(tableClusters)
+        val mergedRanks = mergedTable.map { YoloLabelBridge.toRank(it) }.sorted()
+        val mergedSig = mergedRanks.joinToString(",")
 
         // 7) Update GameState — hand first so hand-count changes that trigger
         //    "new game" wipe the history clean.
-        //    TWO-FRAME CONFIRMATION (v2.2.4): to kill the per-frame handCnt
-        //    flicker (12 → 18 → 17), the candidate hand must match the
-        //    previous frame's candidate *exactly* (as a sorted rank list)
-        //    before we publish it to the GameState.  First-frame observation
-        //    goes into [pendingHandRanks]; second-frame match publishes.
-        //    A new deal (hand ≥ 15) is published immediately, since waiting
-        //    would visibly delay the start-of-game counter.
         var stateChanged = false
         if (handRanks.isNotEmpty()) {
             val sorted = handRanks.sorted()
-            val pending = pendingHandRanks
-            if (sorted == pending) {
-                // Confirmed by 2 consecutive frames → publish.
-                if (sorted != state.myHand()) {
+            if (sorted != state.myHand()) {
+                if (handRanks.size >= 15) {   // a whole new deal replaces the hand
                     state.setMyHand(sorted)
-                    stateChanged = true
-                }
-                pendingHandRanks = sorted
-            } else if (sorted.size >= 15) {
-                // Brand-new deal — publish immediately so the counters
-                // reset in lockstep with the table rather than lagging a
-                // frame behind.
-                if (sorted != state.myHand()) {
+                } else {
+                    // Smaller hand = cards were played; trim to match.
                     state.setMyHand(sorted)
-                    stateChanged = true
                 }
-                pendingHandRanks = sorted
-            } else {
-                // First observation of a (smaller) hand — buffer it; will
-                // be published on the next frame if it matches.
-                pendingHandRanks = sorted
+                stateChanged = true
             }
         }
 
@@ -252,29 +195,12 @@ class NativeYoloPipeline(
         //    last frame (avoids re-recording the same play 100 times/second).
         var playRecorded = false
         var tableCleared = false
-        if (mergedPlays.isNotEmpty()) {
+        if (mergedRanks.isNotEmpty()) {
             emptyTableFrames = 0
-            // Build a per-play (rank list, position) list.  We dedup each
-            // cluster, then call recordPlay for each.  RecordPlay is itself
-            // idempotent (dedup by signature), so duplicates across frames
-            // are harmless.
-            val frameSig = StringBuilder()
-            for (play in mergedPlays) {
-                val dedup = dedupeHorizontal(play)
-                if (dedup.isEmpty()) continue
-                val ranks = dedup.map { YoloLabelBridge.toRank(it) }.sorted()
-                if (ranks.isEmpty()) continue
-                val sig = ranks.joinToString(",")
-                frameSig.append(sig).append('|')
-                val position = guessPlayOriginPosition(
-                    listOf(run { val c = Cluster(); dedup.forEach { c.add(it) }; c.finalize() }),
-                    w, h
-                )
-                if (state.recordPlay(position, ranks)) playRecorded = true
-            }
-            val frameSigStr = frameSig.toString()
-            if (frameSigStr != lastTableSig) {
-                lastTableSig = frameSigStr
+            if (mergedSig != lastTableSig) {
+                val position = guessPlayOriginPosition(tableClusters, w, h)
+                if (state.recordPlay(position, mergedRanks)) playRecorded = true
+                lastTableSig = mergedSig
             }
         } else {
             emptyTableFrames++
@@ -285,16 +211,9 @@ class NativeYoloPipeline(
             }
         }
 
-        // Flatten all table plays for the FrameResult.tablePlay field (kept
-        // for telemetry / UI display only).
-        val allTableRanks = mergedPlays
-            .flatMap { dedupeHorizontal(it) }
-            .map { YoloLabelBridge.toRank(it) }
-            .sorted()
-
         return FrameResult(
             hand = handRanks.sorted(),
-            tablePlay = allTableRanks,
+            tablePlay = mergedRanks,
             totalDetections = dets.size,
             stateChanged = stateChanged || playRecorded || tableCleared,
             handYTopPx = adaptiveHandYTopPx
@@ -327,14 +246,8 @@ class NativeYoloPipeline(
     /** If two small clusters sit side-by-side horizontally (< 40% of
      *  cluster width apart) and their y-ranges overlap, fuse them into a
      *  single play.  Used to glue "44 + (empty) + 77" style dual-plays
-     *  split by the app UI into one recognition bucket.
-     *
-     *  Returns a list of independent plays — each play is the merged card
-     *  list of one fused cluster group, so callers can record each play
-     *  separately via [GameState.recordPlay].  The previous version
-     *  returned a single flat list of every table card, which collapsed
-     *  N plays into one bogus mega-play. */
-    private fun mergePhysicallyAdjacentPlays(clusters: List<Cluster>): List<List<YoloAPI.Obj>> {
+     *  split by the app UI into one recognition bucket. */
+    private fun mergePhysicallyAdjacent(clusters: List<Cluster>): List<YoloAPI.Obj> {
         if (clusters.isEmpty()) return emptyList()
         // Compute cluster bounding boxes in x.
         data class Box(val c: Cluster, val l: Float, val r: Float, val t: Float, val b: Float) {
@@ -364,7 +277,7 @@ class NativeYoloPipeline(
                 fused.add(b)
             }
         }
-        return fused.map { dedupeHorizontal(it.c.cards) }
+        return fused.flatMap { dedupeHorizontal(it.c.cards) }
     }
 
     /**

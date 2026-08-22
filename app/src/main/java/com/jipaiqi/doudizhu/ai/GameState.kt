@@ -219,26 +219,6 @@ class GameState {
         else List<List<Int>>(15 - recent.size) { emptyList() } + recent
     }
 
-    /**
-     * The last 15 actions WITH the position who made each play, oldest first.
-     * Padded with `(LANDLORD, [])` to keep the length at 15.  Used by the
-     * floating window's history panel to render "地主 / 上家 / 下家" tags
-     * alongside the card list — without this, [actionSeq15] only returns the
-     * card ranks, losing who played them.
-     */
-    fun actionSeq15WithPosition(): List<Pair<Position, List<Int>>> = lock.withLock {
-        val recent: List<Pair<Position, List<Int>>> = actionSeq.takeLast(15)
-            .map { it.first to it.second.toList() }
-        if (recent.size >= 15) {
-            recent
-        } else {
-            val pad: List<Pair<Position, List<Int>>> = List(15 - recent.size) {
-                Position.LANDLORD to emptyList()
-            }
-            pad + recent
-        }
-    }
-
     /** True if we have enough information to attempt an AI recommendation. */
     fun isReady(): Boolean = myHand.isNotEmpty() && myPosition != null
 
@@ -257,7 +237,6 @@ class GameState {
             numCardsLeft = numCardsLeft(),
             bombNum = bombNum(),
             cardPlayActionSeq = actionSeq15(),
-            cardPlayActionSeqWithPosition = actionSeq15WithPosition(),
             bottomCards = bottomCards
         )
     }
@@ -278,7 +257,6 @@ data class InfoSetSnapshot(
     val numCardsLeft: Map<Position, Int>,
     val bombNum: Int,
     val cardPlayActionSeq: List<List<Int>>,
-    val cardPlayActionSeqWithPosition: List<Pair<Position, List<Int>>> = emptyList(),
     val bottomCards: List<Int>?
 ) {
     val legalActions: List<List<Int>> by lazy {

@@ -120,13 +120,13 @@ class ScreenCaptureService : Service() {
                         if (np != null) {
                             val r = np.processFrame(bitmap)
                             // record telemetry so the status dots light up correctly
-                            sLastFrameHandCount = r.hand.size
-                            sLastFrameDetections = r.totalDetections
+                            lastFrameHandCount = r.hand.size
+                            lastFrameDetections = r.totalDetections
                             r.stateChanged
                         } else {
                             val r = core.pipeline?.processFrame(bitmap)
-                            sLastFrameHandCount = r?.hand?.size ?: 0
-                            sLastFrameDetections = r?.hand?.size ?: 0
+                            lastFrameHandCount = r?.hand?.size ?: 0
+                            lastFrameDetections = r?.hand?.size ?: 0
                             r?.stateChanged ?: false
                         }
                     }
@@ -141,9 +141,10 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    // Live stats for the status-dot UI exposed as static fields so the
-    // FloatingWindowService can read them without holding a reference to the
-    // capture service instance.  See [companion object] below.
+    // Live stats for the status-dot UI.
+    @Volatile var lastFrameHandCount: Int = 0
+    @Volatile var lastFrameDetections: Int = 0
+
     /** Convert an RGBA_8888 [Image] to a Bitmap without extra copies. */
     private fun imageToBitmap(image: Image): Bitmap? {
         val plane = image.planes.firstOrNull() ?: return null
@@ -214,14 +215,6 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_POSITION = "position"
-
-        // Live stats for the status-dot UI + diagnostic overlay (read by
-        // FloatingWindowService). Static so the overlay can read them even
-        // before/after the capture service is running.
-        @Volatile var sLastFrameHandCount: Int = 0
-            private set
-        @Volatile var sLastFrameDetections: Int = 0
-            private set
 
         fun start(
             context: Context,
